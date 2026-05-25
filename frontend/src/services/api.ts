@@ -233,6 +233,23 @@ class ApiService {
         await this.request('/v1/portfolio/imports', { method: 'DELETE' })
     }
 
+    async deletePortfolioPosition(symbol: string): Promise<{ deleted: boolean; symbol: string }> {
+        return this.request<{ deleted: boolean; symbol: string }>(`/v1/portfolio/imports/${encodeURIComponent(symbol)}`, {
+            method: 'DELETE',
+        })
+    }
+
+    async appendPortfolioPositions(data: {
+        positions: PortfolioPositionInput[]
+        source?: string
+        auto_apply_scheduled?: boolean
+    }): Promise<PortfolioImportState & { added?: string[]; skipped?: string[]; message?: string }> {
+        return this.request<PortfolioImportState & { added?: string[]; skipped?: string[]; message?: string }>('/v1/portfolio/imports/append', {
+            method: 'POST',
+            body: JSON.stringify(data),
+        })
+    }
+
     async parsePositionImage(file: File): Promise<{ positions: PortfolioPositionInput[] }> {
         const formData = new FormData()
         formData.append('file', file)

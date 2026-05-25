@@ -601,7 +601,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
                     return f"No news found for {ticker} between {start_date} and {end_date}"
 
                 rows = []
-                for _, row in df.head(20).iterrows():
+                for _, row in df.head(30).iterrows():
                     title = str(row.get("新闻标题", row.get("标题", "No title")))
                     src = str(row.get("文章来源", row.get("来源", "Unknown")))
                     summary = str(row.get("新闻内容", row.get("内容", "")))
@@ -675,7 +675,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
             if df is not None and not df.empty:
                 return (
                     f"## Insider Transactions for {symbol}\n\n"
-                    f"{df.head(20).to_markdown(index=False)}"
+                    f"{df.head(30).to_markdown(index=False)}"
                 )
             errors.append("stock_main_stock_holder: empty dataframe")
         except Exception as exc:
@@ -935,6 +935,6 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 df = ak.stock_hot_follow_xq(symbol="最热门")
             if df is None or df.empty:
                 return "雪球热搜数据暂不可用。"
-            return f"雪球热搜前20：\n{df.head(20).to_string(index=False)}"
+            return f"雪球热搜前30：\n{df.head(30).to_string(index=False)}"
         except Exception as exc:
             return f"雪球热搜数据获取失败：{type(exc).__name__}: {exc}"

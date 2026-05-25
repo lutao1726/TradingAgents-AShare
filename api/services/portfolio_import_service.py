@@ -184,6 +184,130 @@ def build_scheduled_user_context(db: Session, user_id: str, symbol: str) -> dict
     return normalize_user_context(payload)
 
 
+def delete_position(db: Session, user_id: str, symbol: str) -> bool:
+    """Delete a single imported position by symbol for a user.
+
+    Returns True if a row was deleted, False if not found.
+    """
+    normalized = _normalize_code(symbol)
+    if not normalized:
+        return False
+    deleted = (
+        db.query(ImportedPortfolioPositionDB)
+        .filter(
+            ImportedPortfolioPositionDB.user_id == user_id,
+            ImportedPortfolioPositionDB.symbol == normalized,
+        )
+        .delete()
+    )
+    db.commit()
+    return deleted > 0
+
+
+def append_positions(
+    db: Session,
+    user_id: str,
+    positions: list[dict[str, Any]],
+    source: str = "manual",
+    auto_apply_scheduled: bool = True,
+) -> dict[str, Any]:
+    """Append new positions without removing existing ones.
+
+    Only adds positions whose symbols don't already exist for the user.
+    Each item in *positions* should contain at minimum ``symbol`` (e.g.
+    ``"600519.SH"``).  Optional fields: ``name``, ``current_position``,
+    ``available_position``, ``average_cost``, ``market_value``,
+    ``current_position_pct``.
+    """
+    if not isinstance(positions, list):
+        raise ValueError("positions 必须为列表")
+
+    source = (source or "manual").strip()
+    now = datetime.now(timezone.utc)
+
+    existing_symbols = {
+        row.symbol
+        for row in db.query(ImportedPortfolioPositionDB.symbol)
+        .filter(ImportedPortfolioPositionDB.user_id == user_id)
+        .all()
+    }
+
+    added: list[str] = []
+    skipped: list[str] = []
+    cleaned: list[dict[str, Any]] = []
+
+    for raw in positions:
+        symbol = _normalize_code(raw.get("symbol"))
+        if symbol is None:
+            continue
+        if symbol in existing_symbols:
+            skipped.append(symbol)
+            continue
+        if symbol in {c["symbol"] for c in cleaned}:
+            continue
+        existing_symbols.add(symbol)
+        cleaned.append({
+            "symbol": symbol,
+            "name": (raw.get("name") or "").strip() or None,
+            "current_position": _to_float(raw.get("current_position")),
+            "available_position": _to_float(raw.get("available_position")),
+            "average_cost": _to_float(raw.get("average_cost")),
+            "market_value": _to_float(raw.get("market_value")),
+            "current_position_pct": _to_float(raw.get("current_position_pct")),
+        })
+
+    if not cleaned:
+        return {
+            "added": added,
+            "skipped": skipped,
+            "message": "没有新标的可添加" if skipped else "没有有效的持仓记录",
+            **get_import_state(db, user_id),
+        }
+
+    total_mv = sum(p["market_value"] or 0 for p in cleaned if (p["market_value"] or 0) > 0)
+    if total_mv > 0:
+        for p in cleaned:
+            if p["current_position_pct"] is None and p["market_value"] and p["market_value"] > 0:
+                p["current_position_pct"] = round((p["market_value"] / total_mv) * 100, 4)
+
+    for p in cleaned:
+        db.add(ImportedPortfolioPositionDB(
+            id=uuid4().hex,
+            user_id=user_id,
+            source=source,
+            symbol=p["symbol"],
+            security_name=p["name"],
+            current_position=p["current_position"],
+            available_position=p["available_position"],
+            average_cost=p["average_cost"],
+            market_value=p["market_value"],
+            current_position_pct=p["current_position_pct"],
+            trade_points_json=[],
+            trade_points_count=0,
+            latest_trade_at=None,
+            latest_trade_action=None,
+            last_imported_at=now,
+        ))
+        added.append(p["symbol"])
+
+    scheduled_sync: dict[str, list] = {"created": [], "existing": [], "skipped_limit": []}
+    if auto_apply_scheduled:
+        ordered = [p["symbol"] for p in cleaned if (p["current_position"] or 0) > 0]
+        scheduled_sync = scheduled_service.ensure_scheduled_for_symbols(
+            db=db,
+            user_id=user_id,
+            symbols=ordered,
+        )
+
+    db.commit()
+
+    result = get_import_state(db, user_id, scheduled_sync=scheduled_sync)
+    result["added"] = added
+    result["skipped"] = skipped
+    result["message"] = f"成功添加 {len(added)} 只标的" + (f"，跳过 {len(skipped)} 只已存在的标的" if skipped else "")
+    return result
+
+
 def clear_imported_portfolio(db: Session, user_id: str) -> None:
     """Clear all imported positions for a user, regardless of source."""
     db.query(ImportedPortfolioPositionDB).filter(
@@ -207,7 +331,15 @@ def _normalize_code(value: Any) -> str | None:
             return f"{text}.SH"
         if text.startswith(("0", "3")):
             return f"{text}.SZ"
-        if text.startswith(("4", "8")):
+        if text.startswith("5"):
+            return f"{text}.SH"
+        if text.startswith(("15", "16")):
+            return f"{text}.SZ"
+        if text.startswith(("11", "13")):
+            return f"{text}.SH"
+        if text.startswith("12"):
+            return f"{text}.SZ"
+        if text.startswith(("4", "8", "9")):
             return f"{text}.BJ"
     return None
 

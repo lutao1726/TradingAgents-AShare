@@ -195,10 +195,58 @@ async def _run_manual_trigger(
         with get_db_ctx() as db:
             scheduled_service.record_manual_test_result(db, task_id, "success", report_id=job_id)
         _log(f"[Manual Trigger] Completed {symbol}")
+        
+        _create_tracked_task(
+            _send_manual_trigger_notifications(user_id, job_id, symbol),
+            label=f"Manual trigger notification task ({symbol})",
+        )
     except Exception as e:
         logger.error(f"[Manual Trigger] Failed {symbol}: {e}\n{traceback.format_exc()}")
         with get_db_ctx() as db:
             scheduled_service.record_manual_test_result(db, task_id, "failed")
+
+async def _send_manual_trigger_notifications(
+    user_id: str, report_id: str, symbol: str
+) -> None:
+    """Send email & WeCom notifications for manually triggered analysis."""
+    try:
+        from api.services.email_report_service import send_report_email_with_retry
+        from api.services.wecom_notification_service import send_report_message_with_retry
+
+        def _load_notification_targets():
+            email_user = None
+            report_to_send = None
+            webhook_url = None
+            wecom_report_enabled = True
+            with get_db_ctx() as db:
+                user = db.query(UserDB).filter(UserDB.id == user_id).first()
+                report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
+                user_cfg = auth_service.get_user_llm_config(db, user_id)
+                webhook_url = auth_service.decrypt_secret(
+                    getattr(user_cfg, "wecom_webhook_encrypted", None)
+                )
+                if report:
+                    db.expunge(report)
+                    report_to_send = report
+                if user:
+                    wecom_report_enabled = getattr(user, "wecom_report_enabled", True)
+                    if getattr(user, "email_report_enabled", True):
+                        db.expunge(user)
+                        email_user = user
+            return email_user, report_to_send, webhook_url, wecom_report_enabled
+
+        email_user, report_to_send, webhook_url, wecom_report_enabled = (
+            await asyncio.to_thread(_load_notification_targets)
+        )
+        if email_user and report_to_send:
+            _log(f"[Manual Trigger] Sending email report for {symbol} to {email_user.email}")
+            await send_report_email_with_retry(email_user, report_to_send)
+        if report_to_send and webhook_url and wecom_report_enabled:
+            _log(f"[Manual Trigger] Sending WeCom report for {symbol}")
+            await send_report_message_with_retry(report_to_send, webhook_url)
+    except Exception as e:
+        logger.warning(f"[Manual Trigger] Notification send failed for {symbol}: {e}")
+
 
 
 @asynccontextmanager
@@ -334,7 +382,7 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-_JOB_TIMEOUT = int(os.getenv("TA_JOB_TIMEOUT", "1800"))  # seconds (默认 30 分钟，适配多 Agent 长流程分析)
+_JOB_TIMEOUT = int(os.getenv("TA_JOB_TIMEOUT", "1800"))  # seconds
 def _create_tracked_task(coro, *, label: str = "Background task") -> asyncio.Task:
     """Create an asyncio task and keep a reference to prevent GC.
     Also logs unhandled exceptions via a done callback."""
@@ -877,6 +925,12 @@ class PortfolioPositionItem(BaseModel):
 
 class PortfolioImportSyncRequest(BaseModel):
     positions: List[PortfolioPositionItem] = Field(..., description="持仓列表")
+    source: str = Field("manual", description="持仓来源标识")
+    auto_apply_scheduled: bool = Field(True, description="是否自动将持仓股票加入定时任务")
+
+
+class PortfolioSyncRequest(BaseModel):
+    text: str = Field(..., description="持仓文本，每行一只股票")
     source: str = Field("manual", description="持仓来源标识")
     auto_apply_scheduled: bool = Field(True, description="是否自动将持仓股票加入定时任务")
 
@@ -3942,6 +3996,74 @@ def clear_portfolio_import_state(
     db: Session = Depends(get_db),
 ):
     portfolio_import_service.clear_imported_portfolio(db, current_user.id)
+
+
+@app.delete("/v1/portfolio/imports/{symbol}")
+def delete_portfolio_position(
+    symbol: str,
+    current_user: UserDB = Depends(_require_api_user),
+    db: Session = Depends(get_db),
+):
+    deleted = portfolio_import_service.delete_position(db, current_user.id, symbol)
+    if not deleted:
+        raise HTTPException(404, f"未找到持仓标的：{symbol}")
+    return {"deleted": True, "symbol": symbol}
+
+
+_POSITION_LINE_RE = re.compile(r"^(\d{6})")
+
+
+def _parse_positions_text(text: str) -> List[Dict[str, Any]]:
+    positions: List[Dict[str, Any]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parts = re.split(r"[\s\t]+", line)
+        if not parts:
+            continue
+        symbol = parts[0].replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+        if not _POSITION_LINE_RE.match(symbol):
+            continue
+        name = None
+        numeric_parts: List[str] = []
+        for p in parts[1:]:
+            if p.replace(".", "", 1).isdigit():
+                numeric_parts.append(p)
+            elif name is None and not p[0].isdigit():
+                name = p
+        entry: Dict[str, Any] = {"symbol": symbol}
+        if name:
+            entry["name"] = name
+        if len(numeric_parts) > 0:
+            entry["current_position"] = float(numeric_parts[0])
+        if len(numeric_parts) > 1:
+            entry["average_cost"] = float(numeric_parts[1])
+        if len(numeric_parts) > 2:
+            entry["market_value"] = float(numeric_parts[2])
+        positions.append(entry)
+    return positions
+
+
+@app.post("/v1/portfolio/imports/append")
+def append_portfolio_positions(
+    body: PortfolioSyncRequest,
+    current_user: UserDB = Depends(_require_api_user),
+    db: Session = Depends(get_db),
+):
+    parsed = _parse_positions_text(body.text)
+    if not parsed:
+        raise HTTPException(400, "没有有效的持仓记录")
+    try:
+        return portfolio_import_service.append_positions(
+            db,
+            current_user.id,
+            parsed,
+            source=body.source,
+            auto_apply_scheduled=body.auto_apply_scheduled,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/v1/portfolio/parse-image")
