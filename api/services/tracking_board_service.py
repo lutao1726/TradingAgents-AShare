@@ -1,3 +1,21 @@
+"""
+跟踪看板服务模块：提供持仓跟踪看板的数据聚合。
+
+核心功能：
+1. 实时行情获取：通过数据源获取股票实时价格
+2. 浮动盈亏计算：基于实时价格计算浮动盈亏和盈亏比例
+3. 研报摘要：关联最新研报，提取交易建议摘要
+4. 数据聚合：将持仓、行情、研报数据聚合为看板数据
+
+数据流：
+1. 获取用户的导入持仓
+2. 获取实时行情数据
+3. 获取关联的研报数据
+4. 计算浮动盈亏和盈亏比例
+5. 提取研报摘要
+6. 返回聚合后的看板数据
+"""
+
 from __future__ import annotations
 
 import json
@@ -12,15 +30,43 @@ from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.dataflows.trade_calendar import cn_today_str, previous_cn_trading_day
 
 
+# 跟踪看板自动刷新间隔（秒）
 REFRESH_INTERVAL_SECONDS = 20
+
 logger = logging.getLogger(__name__)
 
 
 def get_tracking_board(db: Session, user_id: str) -> dict[str, Any]:
+    """获取跟踪看板数据。
+    
+    流程：
+    1. 获取用户的导入持仓
+    2. 获取实时行情数据
+    3. 获取关联的研报数据
+    4. 计算浮动盈亏和盈亏比例
+    5. 提取研报摘要
+    6. 返回聚合后的看板数据
+    
+    Args:
+        db: 数据库会话
+        user_id: 用户 ID
+    
+    Returns:
+        看板数据字典，包含：
+        - previous_trade_date: 上一个交易日
+        - refresh_interval_seconds: 刷新间隔
+        - items: 持仓列表（含行情、盈亏、研报摘要）
+    """
     previous_trade_date = previous_cn_trading_day(cn_today_str())
+    
+    # 获取用户的导入持仓
     rows = _list_imported_position_rows(db, user_id)
     symbols = [row.symbol for row in rows]
+    
+    # 获取实时行情
     quotes = _fetch_live_quotes(symbols)
+    
+    # 获取关联的研报
     reports = _select_reports_for_symbols(db, user_id, symbols, previous_trade_date)
 
     items: list[dict[str, Any]] = []
@@ -29,16 +75,22 @@ def get_tracking_board(db: Session, user_id: str) -> dict[str, Any]:
         live_price = _to_float(quote.get("price"))
         current_position = _to_float(row.current_position)
         average_cost = _to_float(row.average_cost)
+        
+        # 计算实时市值
         live_market_value = (
             round(live_price * current_position, 2)
             if live_price is not None and current_position is not None
             else _to_float(row.market_value)
         )
+        
+        # 计算浮动盈亏
         floating_pnl = (
             round((live_price - average_cost) * current_position, 2)
             if live_price is not None and average_cost is not None and current_position is not None
             else None
         )
+        
+        # 计算浮动盈亏比例
         floating_pnl_pct = (
             round(((live_price - average_cost) / average_cost) * 100, 2)
             if live_price is not None and average_cost not in (None, 0)
@@ -81,7 +133,7 @@ def get_tracking_board(db: Session, user_id: str) -> dict[str, Any]:
 
 
 def _list_imported_position_rows(db: Session, user_id: str) -> list[ImportedPortfolioPositionDB]:
-    """Return all imported positions for a user regardless of source."""
+    """获取用户的所有导入持仓（按市值降序）。"""
     return (
         db.query(ImportedPortfolioPositionDB)
         .filter(ImportedPortfolioPositionDB.user_id == user_id)
@@ -100,9 +152,26 @@ def _select_reports_for_symbols(
     symbols: list[str],
     previous_trade_date: str,
 ) -> dict[str, ReportDB]:
+    """为每个标的选择最合适的研报。
+    
+    选择优先级：
+    1. 上一个交易日的研报（精确匹配）
+    2. 上一个交易日之前的最新研报
+    3. 任意最新研报
+    
+    Args:
+        db: 数据库会话
+        user_id: 用户 ID
+        symbols: 股票代码列表
+        previous_trade_date: 上一个交易日
+    
+    Returns:
+        股票代码到研报的映射字典
+    """
     if not symbols:
         return {}
 
+    # 查询所有已完成的研报
     rows = (
         db.query(ReportDB)
         .filter(
@@ -114,9 +183,10 @@ def _select_reports_for_symbols(
         .all()
     )
 
-    exact_previous: dict[str, ReportDB] = {}
-    latest_before_previous: dict[str, ReportDB] = {}
-    latest_any: dict[str, ReportDB] = {}
+    # 按优先级分类研报
+    exact_previous: dict[str, ReportDB] = {}  # 精确匹配上一个交易日
+    latest_before_previous: dict[str, ReportDB] = {}  # 上一个交易日之前的最新
+    latest_any: dict[str, ReportDB] = {}  # 任意最新
 
     for row in rows:
         if row.symbol not in latest_any:
@@ -126,15 +196,26 @@ def _select_reports_for_symbols(
         if row.trade_date <= previous_trade_date and row.symbol not in latest_before_previous:
             latest_before_previous[row.symbol] = row
 
+    # 按优先级选择研报
     selected: dict[str, ReportDB] = {}
     for symbol in symbols:
         report = exact_previous.get(symbol) or latest_before_previous.get(symbol) or latest_any.get(symbol)
         if report:
             selected[symbol] = report
+    
     return selected
 
 
 def _serialize_report_summary(report: ReportDB | None, previous_trade_date: str) -> dict[str, Any] | None:
+    """序列化研报摘要。
+    
+    Args:
+        report: 研报对象
+        previous_trade_date: 上一个交易日
+    
+    Returns:
+        研报摘要字典，无研报返回 None
+    """
     if report is None:
         return None
 
@@ -156,10 +237,28 @@ def _serialize_report_summary(report: ReportDB | None, previous_trade_date: str)
 
 
 def _summarize_trader_advice(text: str | None, fallback_text: str | None = None) -> str | None:
+    """提取交易建议摘要。
+    
+    优先从文本中匹配关键字段：
+    - 最终交易建议
+    - 结论
+    - 建议动作
+    - 方向
+    
+    匹配失败时，提取第一行有意义的文本。
+    
+    Args:
+        text: 主文本（交易员方案）
+        fallback_text: 备用文本（最终交易决策）
+    
+    Returns:
+        摘要文本，提取失败返回 None
+    """
     for source in (text, fallback_text):
         if not source:
             continue
 
+        # 尝试匹配关键字段
         for pattern in (
             r"最终交易建议[:：]\s*([^\n]+)",
             r"结论[:：]\s*([^\n]+)",
@@ -170,6 +269,7 @@ def _summarize_trader_advice(text: str | None, fallback_text: str | None = None)
             if match:
                 return _clip_summary(match.group(1))
 
+        # 回退：提取第一行有意义的文本
         lines = [
             _clip_summary(line.strip(" -*\t"))
             for line in _strip_markdown(source).splitlines()
@@ -178,10 +278,12 @@ def _summarize_trader_advice(text: str | None, fallback_text: str | None = None)
         for line in lines:
             if len(line) >= 6 and not re.match(r"^[一二三四五六七八九十0-9]+[、.)：:]?$", line):
                 return line
+    
     return None
 
 
 def _strip_markdown(text: str) -> str:
+    """去除 Markdown 格式。"""
     cleaned = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
     cleaned = cleaned.replace("\r", "\n")
     cleaned = re.sub(r"`([^`]*)`", r"\1", cleaned)
@@ -192,6 +294,7 @@ def _strip_markdown(text: str) -> str:
 
 
 def _clip_summary(text: str | None) -> str | None:
+    """截断摘要文本（最多 96 字符）。"""
     if text is None:
         return None
     compact = re.sub(r"\s+", " ", text).strip(" ，,;；。")
@@ -201,17 +304,26 @@ def _clip_summary(text: str | None) -> str | None:
 
 
 def _fetch_live_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """获取实时行情数据。
+    
+    Args:
+        symbols: 股票代码列表
+    
+    Returns:
+        股票代码到行情数据的映射字典
+    """
     if not symbols:
         return {}
     try:
         result_json = route_to_vendor("get_realtime_quotes", symbols)
         return json.loads(result_json)
     except Exception as exc:
-        logger.warning("[tracking-board] realtime quote fetch failed: %s", exc)
+        logger.warning("[tracking-board] 实时行情获取失败: %s", exc)
         return {}
 
 
 def _to_float(value: Any) -> float | None:
+    """安全转换为浮点数（保留 4 位小数）。"""
     if value is None:
         return None
     try:

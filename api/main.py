@@ -1,3 +1,30 @@
+"""
+TradingAgents-AShare FastAPI 应用主入口。
+
+核心架构：
+1. RESTful API：提供分析任务、研报、持仓、自选、定时、认证等完整 API
+2. SSE 事件流：分析任务的实时进度推送和 Token 级流式输出
+3. 任务调度：分析任务的并发控制、超时保护、队列管理
+4. 数据持久化：SQLite/PostgreSQL 存储研报、用户、配置等数据
+
+关键组件：
+- AnalyzeRequest/Response：分析请求/响应模型
+- AgentProgressTracker：Agent 进度追踪器，推送里程碑和状态事件
+- _run_job / _run_job_inner：分析任务执行核心逻辑
+- lifespan：应用生命周期管理（初始化/清理）
+- RequireUser：认证依赖注入（JWT + API Token）
+
+启动方式：
+    uv run python -m uvicorn api.main:app --port 8000
+
+环境变量：
+- DATABASE_URL: 数据库连接字符串
+- TA_APP_SECRET_KEY: 应用密钥
+- CORS_ALLOW_ORIGINS: CORS 允许的源
+- TA_JOB_TIMEOUT: 任务超时时间（秒）
+- TA_MAX_WORKERS: 最大工作线程数
+- REDIS_URL: Redis 连接 URL（可选，用于分布式部署）
+"""
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +46,7 @@ from uuid import uuid4
 import logging
 import time
 
-# Configure standard logging to include timestamps
+# 配置标准日志，包含时间戳
 logging.basicConfig(
     level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
     format='[%(asctime)s] %(levelname)s: %(message)s',
@@ -27,52 +54,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 加载 .env 文件中的环境变量
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── FastAPI 核心依赖 ─────────────────────────────────────────────────
 from fastapi import FastAPI, File, HTTPException, Depends, Query, Request, UploadFile, status, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field, field_serializer
-from sqlalchemy.orm import Session
+from fastapi.middleware.cors import CORSMiddleware  # 跨域中间件
+from fastapi.responses import StreamingResponse  # SSE 流式响应
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer  # HTTP Bearer 认证
+from pydantic import BaseModel, Field, field_serializer  # 数据验证模型
+from sqlalchemy.orm import Session  # 数据库会话
 import pandas as pd
 
+# ── 项目内部依赖 ─────────────────────────────────────────────────────
 from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, init_db, get_db, get_db_ctx
-from api.job_store import get_job_store as _new_job_store
+from api.job_store import get_job_store as _new_job_store  # 任务存储工厂
 from api.services import auth_service, portfolio_import_service, report_service, token_service, watchlist_service, scheduled_service, tracking_board_service, feedback_service, sponsor_service
 
 def _get_real_ip(request: Request) -> Optional[str]:
-    """Extract real client IP, preferring Cloudflare/proxy headers."""
+    """提取真实客户端 IP，优先使用 Cloudflare/代理头。
+    
+    优先级：
+    1. CF-Connecting-IP（Cloudflare Tunnel 注入的真实 IP）
+    2. X-Forwarded-For（标准代理头，取第一个 IP）
+    3. request.client.host（直接连接）
+    """
     if request is None:
         return None
-    # Cloudflare Tunnel injects the real client IP here
+    # Cloudflare Tunnel 注入的真实 IP
     ip = request.headers.get("CF-Connecting-IP")
     if ip:
         return ip.strip()
-    # Standard proxy header fallback
+    # 标准代理头回退
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else None
 
 
-from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.graph.data_collector import DataCollector
+# ── TradingAgents 核心依赖 ───────────────────────────────────────────
+from tradingagents.default_config import DEFAULT_CONFIG  # 默认配置
+from tradingagents.graph.trading_graph import TradingAgentsGraph  # 主编排图
+from tradingagents.graph.data_collector import DataCollector  # 数据采集器
 
 # 全局共享 DataCollector：同一 ticker+date 的数据只拉一次，所有 job 复用缓存
 _shared_data_collector = DataCollector()
-from tradingagents.dataflows.trade_calendar import cn_today_str
+
+from tradingagents.dataflows.trade_calendar import cn_today_str  # 今日交易日
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.interface import route_to_vendor
-from tradingagents.graph.intent_parser import parse_intent as _parse_intent
-from tradingagents.agents.utils.context_utils import USER_CONTEXT_KEYS, normalize_user_context
-from tradingagents.agents.utils.agent_states import current_tracker_var
+from tradingagents.graph.intent_parser import parse_intent as _parse_intent  # 意图解析
+from tradingagents.agents.utils.context_utils import USER_CONTEXT_KEYS, normalize_user_context  # 用户上下文
+from tradingagents.agents.utils.agent_states import current_tracker_var  # Agent 追踪器上下文变量
 
 
 def _cors_allow_origins() -> list[str]:
+    """获取 CORS 允许的源列表。
+    
+    优先级：
+    1. 环境变量 CORS_ALLOW_ORIGINS（逗号分隔）
+    2. 默认本地开发端口（5173/5174/5175）
+    """
     raw = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
     default_origins = [
         "http://127.0.0.1:5174",
@@ -88,12 +132,16 @@ def _cors_allow_origins() -> list[str]:
 
 
 def _cors_allow_origin_regex() -> str | None:
+    """获取 CORS 允许的源正则表达式（用于通配域名）。"""
     raw = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip()
     return raw or None
 
 
 def _report_version_stats() -> None:
-    """Report anonymous version stats to the official site."""
+    """上报匿名版本统计到官方站点。
+    
+    异步执行，不阻塞启动流程。
+    """
     import threading, uuid
 
     def _send():
@@ -110,7 +158,10 @@ def _report_version_stats() -> None:
 
 
 def _resolve_scheduled_trade_date(trade_date: str) -> str:
-    """Use the requested trading day, or fall back to the latest CN trading day."""
+    """解析定时任务的交易日期。
+    
+    如果请求的日期是交易日则直接使用，否则回退到最近的交易日。
+    """
     from tradingagents.dataflows.trade_calendar import is_cn_trading_day, previous_cn_trading_day
 
     return trade_date if is_cn_trading_day(trade_date) else previous_cn_trading_day(trade_date)
@@ -251,11 +302,23 @@ async def _send_manual_trigger_notifications(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize resources on startup and cleanup on shutdown."""
-    # Raise the AnyIO thread limiter ceiling so frequent sync endpoints
-    # (tracking-board polling, /v1/jobs/{id} polling, akshare-backed
-    # market endpoints) cannot starve each other when the event loop is
-    # also running long-lived `_run_job` tasks.
+    """应用生命周期管理：启动时初始化资源，关闭时清理。
+    
+    启动流程：
+    1. 提升 AnyIO 线程限制器上限（避免并发端点饥饿）
+    2. 配置 asyncio 默认线程池执行器（64 workers）
+    3. 初始化数据库表和 Schema
+    4. 清理任务存储和后台任务集合
+    5. 安全检查（TA_APP_SECRET_KEY 警告）
+    6. 上报版本统计
+    7. 预加载交易日历和股票名称映射
+    
+    关闭流程：
+    1. 关闭线程池执行器
+    2. 释放资源
+    """
+    # 提升 AnyIO 线程限制器上限
+    # 防止频繁的同步端点（轮询、akshare）在长任务运行时互相饥饿
     try:
         from anyio import to_thread as _anyio_to_thread
 
@@ -263,14 +326,12 @@ async def lifespan(app: FastAPI):
         desired = int(os.getenv("ANYIO_THREAD_LIMIT", "120"))
         if limiter.total_tokens < desired:
             limiter.total_tokens = desired
-            _log(f"AnyIO thread limiter raised to {desired}.")
+            _log(f"AnyIO 线程限制器已提升至 {desired}。")
     except Exception as exc:
-        _log(f"Could not raise AnyIO thread limiter: {exc}")
+        _log(f"无法提升 AnyIO 线程限制器: {exc}")
 
-    # Default asyncio executor is used by `asyncio.to_thread`. The CPython
-    # default is `min(32, cpu_count + 4)`, which is too small when many
-    # `_run_job_inner` coroutines fan out concurrent `to_thread` calls for
-    # DB writes, LLM extraction, and akshare data collection.
+    # 配置 asyncio 默认线程池执行器
+    # CPython 默认是 min(32, cpu_count + 4)，对于并发 _run_job 太小
     new_default_executor: Optional[ThreadPoolExecutor] = None
     try:
         loop = asyncio.get_running_loop()
@@ -280,38 +341,47 @@ async def lifespan(app: FastAPI):
             thread_name_prefix="ta-asyncio",
         )
         loop.set_default_executor(new_default_executor)
-        _log(f"Default asyncio executor set to {executor_workers} workers.")
+        _log(f"asyncio 默认执行器已设置为 {executor_workers} workers。")
     except Exception as exc:
-        _log(f"Could not configure default asyncio executor: {exc}")
+        _log(f"无法配置 asyncio 默认执行器: {exc}")
 
+    # 初始化数据库
     init_db()
-    _log("Database initialized.")
+    _log("数据库初始化完成。")
+    
+    # 清理任务存储和后台任务集合
     store = get_job_store()
     store.clear()
     _background_tasks.clear()
 
-    # Security: warn loudly if using default secret key
+    # 安全检查：使用默认密钥时发出警告
     if not os.getenv("TA_APP_SECRET_KEY"):
         _log("=" * 70)
-        _log("WARNING: TA_APP_SECRET_KEY is not set!")
-        _log("Using hardcoded default key. ALL encryption and JWT signing")
-        _log("is INSECURE. Set TA_APP_SECRET_KEY env var before production use.")
+        _log("警告: TA_APP_SECRET_KEY 未设置！")
+        _log("使用硬编码默认密钥。所有加密和 JWT 签名都不安全。")
+        _log("生产环境使用前请设置 TA_APP_SECRET_KEY 环境变量。")
         _log("=" * 70)
 
+    # 上报匿名版本统计
     _report_version_stats()
-    # Pre-load trade calendar (uses mini_racer/V8 which is not thread-safe)
+    
+    # 预加载交易日历（使用 mini_racer/V8，非线程安全）
     from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
     _load_cn_trade_dates()
-    _log("Trade calendar pre-loaded.")
-    # Pre-load stock + ETF name map
+    _log("交易日历预加载完成。")
+    
+    # 预加载股票+ETF 名称映射
     await asyncio.to_thread(_load_cn_stock_map)
-    _log("Stock map pre-loaded on startup.")
-    yield
-    _log("Shutting down: Cleaning up resources...")
+    _log("股票名称映射启动时预加载完成。")
+    
+    yield  # 应用运行期间
+    
+    # 关闭清理
+    _log("正在关闭：清理资源...")
     _executor.shutdown(wait=True)
     if new_default_executor is not None:
         new_default_executor.shutdown(wait=False)
-    _log("Executor shutdown complete.")
+    _log("执行器关闭完成。")
 
 
 _is_prod = os.getenv("ENV", "").lower() == "prod"

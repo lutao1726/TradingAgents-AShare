@@ -1,6 +1,8 @@
-import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History, Clock3 } from 'lucide-react'
+import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History, Clock3, FileDown } from 'lucide-react'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import html2canvas from 'html2canvas-pro'
+import { jsPDF } from 'jspdf'
 import TaskProgressBanner from '@/components/TaskProgressBanner'
 import { api } from '@/services/api'
 import type { Report, ReportDetail } from '@/types'
@@ -76,7 +78,7 @@ function ActiveReportStatus({ report }: { report: Report }) {
             </div>
             <div className="h-1.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                 <div
-                    className={`h-full rounded-full bg-gradient-to-r ${barCls} transition-[width] duration-700 ease-out`}
+                    className={`h-full rounded-full bg-linear-to-r ${barCls} transition-[width] duration-700 ease-out`}
                     style={{ width: `${progress}%` }}
                 />
             </div>
@@ -115,7 +117,7 @@ function ActiveDetailStatusCard({ report }: { report: ReportDetail }) {
                         </div>
                         <div className="h-2.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                             <div
-                                className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500 transition-[width] duration-700 ease-out"
+                                className="h-full rounded-full bg-linear-to-r from-cyan-500 via-blue-500 to-indigo-500 transition-[width] duration-700 ease-out"
                                 style={{ width: `${progress}%` }}
                             />
                         </div>
@@ -175,6 +177,94 @@ function exportReport(report: ReportDetail) {
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
+}
+
+async function exportReportPdf(report: ReportDetail) {
+    const sections = [
+        { key: 'market_report', title: '市场分析报告' },
+        { key: 'sentiment_report', title: '舆情分析报告' },
+        { key: 'news_report', title: '新闻分析报告' },
+        { key: 'fundamentals_report', title: '基本面分析报告' },
+        { key: 'investment_plan', title: '研究团队决策' },
+        { key: 'trader_investment_plan', title: '交易团队计划' },
+        { key: 'final_trade_decision', title: '最终交易决策' },
+    ]
+
+    const container = document.createElement('div')
+    container.style.cssText = 'position:fixed;left:-9999px;top:0;width:794px;padding:40px;background:#fff;color:#1e293b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;font-size:14px;line-height:1.8;'
+
+    const title = document.createElement('h1')
+    title.textContent = `${report.name || report.symbol} 分析报告`
+    title.style.cssText = 'font-size:22px;font-weight:700;margin-bottom:8px;color:#0f172a;'
+    container.appendChild(title)
+
+    const meta = document.createElement('div')
+    meta.textContent = `标的：${report.symbol} | 分析日期：${report.trade_date} | 生成时间：${report.created_at ? new Date(report.created_at).toLocaleString('zh-CN') : '-'}`
+    meta.style.cssText = 'font-size:12px;color:#64748b;margin-bottom:24px;padding-bottom:16px;border-bottom:1px solid #e2e8f0;'
+    container.appendChild(meta)
+
+    for (const section of sections) {
+        const sectionContent = report[section.key as keyof ReportDetail]
+        if (!sectionContent) continue
+
+        const h = document.createElement('h2')
+        h.textContent = section.title
+        h.style.cssText = 'font-size:18px;font-weight:700;margin:24px 0 12px;color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:8px;'
+        container.appendChild(h)
+
+        const lines = String(sectionContent).split('\n')
+        for (const line of lines) {
+            if (line.startsWith('### ')) {
+                const h3 = document.createElement('h3')
+                h3.textContent = line.replace(/^#+\s*/, '')
+                h3.style.cssText = 'font-size:15px;font-weight:600;margin:16px 0 8px;color:#334155;'
+                container.appendChild(h3)
+            } else if (line.startsWith('- ') || line.startsWith('* ')) {
+                const li = document.createElement('div')
+                li.textContent = '• ' + line.replace(/^[-*]\s*/, '')
+                li.style.cssText = 'margin:4px 0;padding-left:16px;'
+                container.appendChild(li)
+            } else if (line.trim() === '') {
+                const br = document.createElement('div')
+                br.style.height = '8px'
+                container.appendChild(br)
+            } else {
+                const p = document.createElement('p')
+                p.textContent = line
+                p.style.cssText = 'margin:8px 0;'
+                container.appendChild(p)
+            }
+        }
+    }
+
+    document.body.appendChild(container)
+
+    try {
+        const canvas = await html2canvas(container, { scale: 2, useCORS: true, backgroundColor: '#ffffff' })
+        const imgData = canvas.toDataURL('image/png')
+        const pdf = new jsPDF('p', 'mm', 'a4')
+        const pdfWidth = pdf.internal.pageSize.getWidth()
+        const pdfHeight = pdf.internal.pageSize.getHeight()
+        const imgWidth = pdfWidth - 20
+        const imgHeight = (canvas.height * imgWidth) / canvas.width
+
+        let heightLeft = imgHeight
+        let position = 10
+
+        pdf.addImage(imgData, 'PNG', 10, position, imgWidth, imgHeight)
+        heightLeft -= (pdfHeight - 20)
+
+        while (heightLeft > 0) {
+            position = heightLeft - imgHeight + 10
+            pdf.addPage()
+            pdf.addImage(imgData, 'PNG', 10, position, imgWidth, imgHeight)
+            heightLeft -= (pdfHeight - 20)
+        }
+
+        pdf.save(`analysis-${report.symbol}-${report.trade_date}.pdf`)
+    } finally {
+        document.body.removeChild(container)
+    }
 }
 
 export default function Reports() {
@@ -451,6 +541,13 @@ export default function Reports() {
                     >
                         <Download className="w-4 h-4" />
                         导出 Markdown
+                    </button>
+                    <button
+                        onClick={() => exportReportPdf(selectedReport)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition-colors"
+                    >
+                        <FileDown className="w-4 h-4" />
+                        导出 PDF
                     </button>
                 </div>
 

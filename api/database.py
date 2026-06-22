@@ -1,4 +1,19 @@
-"""Database configuration and session management."""
+"""数据库配置和会话管理模块。
+
+核心功能：
+1. 数据库引擎创建与连接池配置
+2. SQLAlchemy ORM 模型定义（Report、User、Watchlist、Scheduled 等）
+3. 数据库会话管理（FastAPI Depends 和手动上下文管理器）
+4. 轻量级 Schema 迁移（无需 Alembic，适合开发阶段快速迭代）
+5. 安全相关迁移（API Token 哈希化、密钥重加密）
+
+数据库支持：
+- SQLite（默认）：开发/单机部署，WAL 模式提升并发性能
+- PostgreSQL/MySQL：生产环境，更大连接池
+
+环境变量：
+- DATABASE_URL：数据库连接字符串，默认 sqlite:///./tradingagents.db
+"""
 
 import logging
 import os
@@ -8,23 +23,28 @@ from typing import Generator
 from sqlalchemy import Boolean, create_engine, Column, String, DateTime, Text, Integer, Float, JSON, UniqueConstraint, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-# Database URL - default to SQLite for simplicity
+# 数据库 URL - 默认使用 SQLite
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tradingagents.db")
 
-# Create engine
+# 创建数据库引擎
 if DATABASE_URL.startswith("sqlite"):
+    # SQLite 配置：check_same_thread=False 允许多线程访问
     engine = create_engine(
         DATABASE_URL,
-        connect_args={"check_same_thread": False},
-        echo=False,
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=60,
-        pool_recycle=3600,
+        connect_args={"check_same_thread": False},  # FastAPI 多线程必需
+        echo=False,  # 不打印 SQL 语句
+        pool_size=10,  # 连接池大小
+        max_overflow=20,  # 最大溢出连接数
+        pool_timeout=60,  # 获取连接超时时间（秒）
+        pool_recycle=3600,  # 连接回收时间（秒）
     )
 
     def _can_use_wal() -> bool:
-        """Check if WAL mode is safe: db's parent dir must be writable for -shm/-wal files."""
+        """检查是否可以使用 WAL 模式。
+        
+        WAL（Write-Ahead Logging）模式需要数据库所在目录可写，
+        因为会在数据库文件旁创建 -shm 和 -wal 文件。
+        """
         import pathlib
         db_path = DATABASE_URL.replace("sqlite:///", "").replace("sqlite://", "")
         parent = pathlib.Path(db_path).resolve().parent
@@ -34,31 +54,48 @@ if DATABASE_URL.startswith("sqlite"):
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, connection_record):
+        """SQLite 连接初始化：设置 WAL 模式。
+        
+        WAL 模式优势：
+        - 读写并发性能更好
+        - 写操作不会阻塞读操作
+        - 更好的崩溃恢复能力
+        """
         cursor = dbapi_connection.cursor()
         if _use_wal:
             cursor.execute("PRAGMA journal_mode=WAL")
         cursor.close()
 else:
-    # For PostgreSQL/MySQL, use a larger pool to handle concurrency
+    # PostgreSQL/MySQL 配置：更大连接池处理并发
     engine = create_engine(
         DATABASE_URL,
         echo=False,
-        pool_size=20,
-        max_overflow=10,
-        pool_timeout=30,
-        pool_recycle=3600,
+        pool_size=20,  # 更大的连接池
+        max_overflow=10,  # 最大溢出连接数
+        pool_timeout=30,  # 获取连接超时时间（秒）
+        pool_recycle=3600,  # 连接回收时间（秒）
     )
 
-# Session factory
+# 会话工厂 - 配置自动提交/刷新
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base class for models
+# ORM 模型基类
 Base = declarative_base()
 logger = logging.getLogger(__name__)
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Get database session (for FastAPI Depends)."""
+    """获取数据库会话（FastAPI Depends 注入）。
+    
+    使用方式：
+        @app.get("/api/data")
+        def get_data(db: Session = Depends(get_db)):
+            return db.query(SomeModel).all()
+    
+    特性：
+    - 自动关闭会话（finally 块）
+    - 适合 FastAPI 依赖注入
+    """
     db = SessionLocal()
     try:
         yield db
@@ -67,11 +104,15 @@ def get_db() -> Generator[Session, None, None]:
 
 
 class get_db_ctx:
-    """Context manager for manual DB session usage.
-
-    Usage:
+    """手动数据库会话上下文管理器。
+    
+    使用方式：
         with get_db_ctx() as db:
             db.query(...)
+    
+    特性：
+    - 异常时自动回滚
+    - 适合非 FastAPI 场景（如脚本、服务层）
     """
 
     def __init__(self) -> None:
@@ -84,22 +125,46 @@ class get_db_ctx:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if self.db is not None:
             if exc_type is not None:
-                self.db.rollback()
-            self.db.close()
+                self.db.rollback()  # 异常时回滚
+            self.db.close()  # 关闭会话
 
 
 def init_db() -> None:
-    """Initialize database tables."""
-    Base.metadata.create_all(bind=engine)
-    _ensure_report_schema()
-    _ensure_user_schema()
+    """初始化数据库表。
+    
+    执行流程：
+    1. 创建所有 ORM 模型对应的表
+    2. 确保 reports 表 Schema 完整（轻量级迁移）
+    3. 确保 users 表 Schema 完整（轻量级迁移）
+    """
+    Base.metadata.create_all(bind=engine)  # 创建表
+    _ensure_report_schema()  # 确保报告表 Schema
+    _ensure_user_schema()  # 确保用户表 Schema
 
 
 def _ensure_report_schema() -> None:
-    """Add lightweight columns for existing SQLite deployments without migrations."""
+    """为现有 SQLite 部署添加轻量级列迁移。
+    
+    功能：
+    - 检查 reports 表是否缺少必要列
+    - 缺少时自动添加，无需手动迁移
+    
+    新增列：
+    - direction: 分析方向（看多、看空等）
+    - status: 任务状态（pending, running, completed, failed）
+    - error: 错误信息
+    - analyst_traces: 分析师研判轨迹（JSON）
+    - macro_report: 宏观分析师报告
+    - smart_money_report: 主力资金分析师报告
+    - game_theory_report: 博弈分析师报告
+    - volume_price_report: 量价分析师报告
+    """
     try:
         with engine.begin() as conn:
+            # 获取 reports 表的所有列名
             columns = {row[1] for row in conn.execute(text("PRAGMA table_info(reports)"))}
+            
+            # 逐个检查并添加缺失的列
             if "direction" not in columns:
                 conn.execute(text("ALTER TABLE reports ADD COLUMN direction VARCHAR(50)"))
             if "status" not in columns:
@@ -117,13 +182,25 @@ def _ensure_report_schema() -> None:
             if "volume_price_report" not in columns:
                 conn.execute(text("ALTER TABLE reports ADD COLUMN volume_price_report TEXT"))
     except Exception as e:
-        logger.error("Failed to ensure report schema: %s", e)
+        logger.error("确保报告表 Schema 失败: %s", e)
 
 
 def _ensure_user_schema() -> None:
-    """Add columns to users table for existing SQLite deployments without migrations."""
+    """为现有 SQLite 部署添加用户相关表的轻量级列迁移。
+    
+    功能：
+    - 检查 users 表和 user_llm_configs 表是否缺少必要列
+    - 缺少时自动添加
+    - 执行 API Token 哈希化迁移
+    - 执行 API Key 重加密迁移
+    
+    新增列：
+    - users 表：last_login_ip, email_report_enabled, wecom_report_enabled
+    - user_llm_configs 表：wecom_webhook_encrypted, default_analysts
+    """
     try:
         with engine.begin() as conn:
+            # 检查 users 表列
             columns = {row[1] for row in conn.execute(text("PRAGMA table_info(users)"))}
             if "last_login_ip" not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN last_login_ip VARCHAR(45)"))
@@ -131,61 +208,91 @@ def _ensure_user_schema() -> None:
                 conn.execute(text("ALTER TABLE users ADD COLUMN email_report_enabled BOOLEAN NOT NULL DEFAULT 1"))
             if "wecom_report_enabled" not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN wecom_report_enabled BOOLEAN NOT NULL DEFAULT 1"))
+            
+            # 检查 user_llm_configs 表列
             llm_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(user_llm_configs)"))}
             if "wecom_webhook_encrypted" not in llm_columns:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN wecom_webhook_encrypted TEXT"))
             if "default_analysts" not in llm_columns:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN default_analysts TEXT"))
     except Exception as e:
-        logger.error("Failed to ensure user schema: %s", e)
+        logger.error("确保用户表 Schema 失败: %s", e)
 
-    _migrate_tokens_to_hashed()
-    _migrate_api_keys_reencrypt()
+    # 执行安全相关迁移
+    _migrate_tokens_to_hashed()  # API Token 哈希化
+    _migrate_api_keys_reencrypt()  # API Key 重加密
 
 
 def _migrate_tokens_to_hashed() -> None:
-    """Migrate plaintext API tokens to HMAC-SHA256 hashed storage."""
+    """将明文 API Token 迁移为 HMAC-SHA256 哈希存储。
+    
+    迁移逻辑：
+    1. 检测以 "ta-sk-" 开头的明文 Token
+    2. 使用 HMAC-SHA256 哈希化
+    3. 保存最后 4 位作为提示（token_hint）
+    4. 更新数据库记录
+    
+    安全优势：
+    - 数据库泄露时不会直接暴露 Token
+    - 仍可通过提示识别 Token
+    """
     import hashlib, hmac
     try:
         with engine.begin() as conn:
-            # Add token_hint column if missing
+            # 检查 token_hint 列是否存在
             token_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(user_tokens)"))}
             if "token_hint" not in token_cols:
                 conn.execute(text("ALTER TABLE user_tokens ADD COLUMN token_hint VARCHAR(8)"))
 
-            # Detect un-migrated rows: plaintext tokens start with "ta-sk-"
+            # 检测未迁移的明文 Token
             rows = conn.execute(text("SELECT id, token FROM user_tokens WHERE token LIKE 'ta-sk-%'")).fetchall()
             if not rows:
-                return
+                return  # 已经迁移过
+            
             from api.services.auth_service import _secret_key
             key = _secret_key().encode("utf-8")
+            
             for row_id, plaintext in rows:
+                # HMAC-SHA256 哈希
                 token_hash = hmac.new(key, plaintext.encode("utf-8"), hashlib.sha256).hexdigest()
-                hint = plaintext[-4:]
+                hint = plaintext[-4:]  # 保存最后 4 位
+                
+                # 更新数据库
                 conn.execute(
                     text("UPDATE user_tokens SET token = :hash, token_hint = :hint WHERE id = :id"),
                     {"hash": token_hash, "hint": hint, "id": row_id},
                 )
-            logger.info("[security] Migrated %s API tokens from plaintext to hashed storage.", len(rows))
+            logger.info("[安全] 已迁移 %s 个 API Token 从明文到哈希存储。", len(rows))
     except Exception as e:
-        logger.error("Token hash migration failed: %s", e)
+        logger.error("Token 哈希迁移失败: %s", e)
 
 
 def _migrate_api_keys_reencrypt() -> None:
-    """Re-encrypt user secrets when TA_APP_SECRET_KEY changes.
-
-    On startup, if a custom secret is configured, tries to decrypt each secret
-    with the current secret. If that fails, tries the default secret (old data).
-    If the default key works, re-encrypts with the current key and writes back.
+    """当 TA_APP_SECRET_KEY 变更时重新加密用户密钥。
+    
+    迁移逻辑：
+    1. 检查是否配置了自定义密钥
+    2. 遍历所有用户的加密数据
+    3. 尝试用当前密钥解密
+    4. 如果失败，尝试用默认密钥解密（旧数据）
+    5. 如果默认密钥成功，用当前密钥重新加密并更新
+    
+    适用场景：
+    - 从开发环境迁移到生产环境（更换了 TA_APP_SECRET_KEY）
+    - 密钥轮换
     """
     from api.services.auth_service import (
         is_custom_secret_configured, decrypt_secret,
         decrypt_secret_with_fallback, encrypt_secret,
     )
+    
+    # 只有配置了自定义密钥才执行迁移
     if not is_custom_secret_configured():
         return
+    
     try:
         with engine.begin() as conn:
+            # 查询所有加密数据
             rows = conn.execute(
                 text(
                     """
@@ -195,14 +302,17 @@ def _migrate_api_keys_reencrypt() -> None:
                     """
                 )
             ).fetchall()
+            
             if not rows:
-                return
-            # Quick check: if the first row decrypts fine, likely all are OK already.
+                return  # 无加密数据
+            
+            # 快速检查：如果第一条记录能正常解密，可能已经迁移过
             _, first_api_key, first_wecom_webhook = rows[0]
             first_secret = first_api_key or first_wecom_webhook
             if first_secret and decrypt_secret(first_secret) is not None and len(rows) < 50:
-                # Small dataset, still verify all — but for large sets, skip if first is OK
+                # 小数据集，仍然验证所有；大数据集如果第一条 OK 则跳过
                 pass
+            
             migrated = 0
             for user_id, encrypted_api_key, encrypted_wecom_webhook in rows:
                 for column_name, encrypted_value in (
@@ -211,17 +321,25 @@ def _migrate_api_keys_reencrypt() -> None:
                 ):
                     if not encrypted_value:
                         continue
+                    
+                    # 尝试用当前密钥解密
                     if decrypt_secret(encrypted_value) is not None:
-                        continue
+                        continue  # 已经是当前密钥加密的
+                    
+                    # 尝试用回退密钥解密（旧数据）
                     plaintext = decrypt_secret_with_fallback(encrypted_value)
                     if plaintext is None:
                         logger.warning(
-                            "[security] Cannot decrypt %s for user %s with any known key. Skipping.",
+                            "[安全] 无法用任何已知密钥解密用户的 %s（user_id=%s）。跳过。",
                             column_name,
                             user_id,
                         )
                         continue
+                    
+                    # 用当前密钥重新加密
                     new_encrypted = encrypt_secret(plaintext)
+                    
+                    # 更新数据库
                     if column_name == "api_key_encrypted":
                         conn.execute(
                             text("UPDATE user_llm_configs SET api_key_encrypted = :enc WHERE user_id = :uid"),
@@ -233,61 +351,88 @@ def _migrate_api_keys_reencrypt() -> None:
                             {"enc": new_encrypted, "uid": user_id},
                         )
                     migrated += 1
+            
             if migrated:
-                logger.info("[security] Re-encrypted %s user secret(s) with new TA_APP_SECRET_KEY.", migrated)
+                logger.info("[安全] 已用新的 TA_APP_SECRET_KEY 重新加密 %s 个用户密钥。", migrated)
     except Exception as e:
-        logger.error("User secret re-encryption migration failed: %s", e)
+        logger.error("用户密钥重加密迁移失败: %s", e)
 
 
-# Report Model
+# ─────────────────────────────────────────────────────────────────────
+# ORM 模型定义
+# ─────────────────────────────────────────────────────────────────────
+
+
 class ReportDB(Base):
-    """Report database model."""
+    """研报数据库模型。
+    
+    存储分析任务的完整结果，包括：
+    - 任务生命周期信息（状态、错误）
+    - 决策信息（方向、置信度、目标价、止损价）
+    - 各分析师报告（技术、舆情、新闻、基本面、宏观、主力资金、量价）
+    - 结构化数据（风险项、关键指标、分析师轨迹）
+    
+    使用场景：
+    - 历史研报查询
+    - 研报导出
+    - 跟踪看板数据源
+    """
     
     __tablename__ = "reports"
     
-    id = Column(String(36), primary_key=True, index=True)
-    user_id = Column(String(64), index=True, nullable=True)  # For future multi-user support
-    symbol = Column(String(20), index=True, nullable=False)
-    trade_date = Column(String(10), nullable=False)
+    # 主键与关联
+    id = Column(String(36), primary_key=True, index=True)  # 任务 ID（UUID）
+    user_id = Column(String(64), index=True, nullable=True)  # 用户 ID（预留多用户支持）
+    symbol = Column(String(20), index=True, nullable=False)  # 股票代码（如 600519.SH）
+    trade_date = Column(String(10), nullable=False)  # 交易日期（如 2026-05-26）
     
-    # Task lifecycle info
-    status = Column(String(20), default="completed", index=True)  # pending, running, completed, failed
-    error = Column(Text, nullable=True)
+    # 任务生命周期信息
+    status = Column(String(20), default="completed", index=True)  # 状态：pending, running, completed, failed
+    error = Column(Text, nullable=True)  # 错误信息（失败时记录）
     
-    # Decision info
-    decision = Column(String(50), nullable=True)  # BUY, SELL, HOLD, etc.
-    direction = Column(String(50), nullable=True)  # 看多、偏多、中性、偏空、看空
-    confidence = Column(Integer, nullable=True)  # 0-100
-    target_price = Column(Float, nullable=True)
-    stop_loss_price = Column(Float, nullable=True)
+    # 决策信息
+    decision = Column(String(50), nullable=True)  # 交易决策：BUY, SELL, HOLD 等
+    direction = Column(String(50), nullable=True)  # 分析方向：看多、偏多、中性、偏空、看空
+    confidence = Column(Integer, nullable=True)  # 置信度：0-100
+    target_price = Column(Float, nullable=True)  # 目标价
+    stop_loss_price = Column(Float, nullable=True)  # 止损价
     
-    # Full analysis results stored as JSON
+    # 完整分析结果（JSON 格式）
     result_data = Column(JSON, nullable=True)
 
-    # LLM-extracted structured data
-    risk_items = Column(JSON, nullable=True)   # [{"name": "...", "level": "high|medium|low", "description": "..."}]
-    key_metrics = Column(JSON, nullable=True)  # [{"name": "...", "value": "...", "status": "good|neutral|bad"}]
-    analyst_traces = Column(JSON, nullable=True) # [{"agent": "...", "verdict": "...", "key_finding": "..."}]
+    # LLM 提取的结构化数据
+    risk_items = Column(JSON, nullable=True)   # 风险项列表：[{"name": "...", "level": "high|medium|low", "description": "..."}]
+    key_metrics = Column(JSON, nullable=True)  # 关键指标列表：[{"name": "...", "value": "...", "status": "good|neutral|bad"}]
+    analyst_traces = Column(JSON, nullable=True) # 分析师研判轨迹：[{"agent": "...", "verdict": "...", "key_finding": "..."}]
 
-    # Individual reports (for quick access)
-    market_report = Column(Text, nullable=True)
-    sentiment_report = Column(Text, nullable=True)
-    news_report = Column(Text, nullable=True)
-    fundamentals_report = Column(Text, nullable=True)
-    macro_report = Column(Text, nullable=True)
-    smart_money_report = Column(Text, nullable=True)
-    volume_price_report = Column(Text, nullable=True)
-    game_theory_report = Column(Text, nullable=True)
-    investment_plan = Column(Text, nullable=True)
-    trader_investment_plan = Column(Text, nullable=True)
-    final_trade_decision = Column(Text, nullable=True)
+    # 各分析师报告（独立字段，便于快速访问）
+    market_report = Column(Text, nullable=True)  # 技术分析师报告
+    sentiment_report = Column(Text, nullable=True)  # 舆情分析师报告
+    news_report = Column(Text, nullable=True)  # 新闻分析师报告
+    fundamentals_report = Column(Text, nullable=True)  # 基本面分析师报告
+    macro_report = Column(Text, nullable=True)  # 宏观分析师报告
+    smart_money_report = Column(Text, nullable=True)  # 主力资金分析师报告
+    volume_price_report = Column(Text, nullable=True)  # 量价分析师报告
+    game_theory_report = Column(Text, nullable=True)  # 博弈分析师报告
+    investment_plan = Column(Text, nullable=True)  # 研究总监投资计划
+    trader_investment_plan = Column(Text, nullable=True)  # 交易员交易方案
+    final_trade_decision = Column(Text, nullable=True)  # 最终交易决策
     
-    # Metadata
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    # 元数据
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
     
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
+        """转换为字典格式。
+        
+        返回值：
+        - 包含所有字段的字典
+        - 日期时间字段转换为 ISO 格式字符串
+        
+        使用场景：
+        - API 响应序列化
+        - 前端数据展示
+        """
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -319,164 +464,294 @@ class ReportDB(Base):
 
 
 class UserDB(Base):
+    """用户数据库模型。
+    
+    存储用户基本信息和偏好设置。
+    
+    字段说明：
+    - id: 用户唯一标识（UUID）
+    - email: 用户邮箱（唯一，用于登录）
+    - is_active: 账户是否激活
+    - last_login_at: 最后登录时间
+    - last_login_ip: 最后登录 IP
+    - email_report_enabled: 是否启用邮件报告
+    - wecom_report_enabled: 是否启用企业微信报告
+    """
     __tablename__ = "users"
 
-    id = Column(String(36), primary_key=True, index=True)
-    email = Column(String(255), unique=True, index=True, nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    last_login_at = Column(DateTime, nullable=True)
-    last_login_ip = Column(String(45), nullable=True)
-    email_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")
-    wecom_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")
+    id = Column(String(36), primary_key=True, index=True)  # 用户 ID
+    email = Column(String(255), unique=True, index=True, nullable=False)  # 邮箱（唯一）
+    is_active = Column(Boolean, default=True, nullable=False)  # 账户激活状态
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
+    last_login_at = Column(DateTime, nullable=True)  # 最后登录时间
+    last_login_ip = Column(String(45), nullable=True)  # 最后登录 IP（支持 IPv6）
+    email_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")  # 邮件报告开关
+    wecom_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")  # 企业微信报告开关
 
 
 class EmailVerificationCodeDB(Base):
+    """邮箱验证码数据库模型。
+    
+    用于邮箱登录验证，支持验证码过期和消费状态追踪。
+    
+    字段说明：
+    - email: 接收验证码的邮箱
+    - code_hash: 验证码哈希（不存储明文）
+    - purpose: 验证码用途（login, register 等）
+    - expires_at: 过期时间
+    - consumed_at: 消费时间（已使用时记录）
+    """
     __tablename__ = "email_verification_codes"
 
-    id = Column(String(36), primary_key=True, index=True)
-    email = Column(String(255), index=True, nullable=False)
-    code_hash = Column(String(255), nullable=False)
-    purpose = Column(String(50), default="login", nullable=False)
-    expires_at = Column(DateTime, nullable=False)
-    consumed_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True, index=True)  # 验证码 ID
+    email = Column(String(255), index=True, nullable=False)  # 邮箱
+    code_hash = Column(String(255), nullable=False)  # 验证码哈希
+    purpose = Column(String(50), default="login", nullable=False)  # 用途
+    expires_at = Column(DateTime, nullable=False)  # 过期时间
+    consumed_at = Column(DateTime, nullable=True)  # 消费时间
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
 
 
 class UserLLMConfigDB(Base):
+    """用户 LLM 配置数据库模型。
+    
+    存储每个用户的 LLM 配置，包括：
+    - LLM 提供商（OpenAI, Anthropic 等）
+    - 后端 URL
+    - 快速/深度思考模型
+    - 辩论轮次配置
+    - 加密的 API Key
+    - 加密的企业微信 Webhook
+    - 默认启用的分析师列表
+    
+    安全说明：
+    - API Key 和 Webhook URL 使用 AES 加密存储
+    - 启动时自动重加密（密钥变更时）
+    """
     __tablename__ = "user_llm_configs"
 
-    user_id = Column(String(36), primary_key=True, index=True)
-    llm_provider = Column(String(50), nullable=True)
-    backend_url = Column(String(500), nullable=True)
-    quick_think_llm = Column(String(255), nullable=True)
-    deep_think_llm = Column(String(255), nullable=True)
-    max_debate_rounds = Column(Integer, nullable=True)
-    max_risk_discuss_rounds = Column(Integer, nullable=True)
-    api_key_encrypted = Column(Text, nullable=True)
-    wecom_webhook_encrypted = Column(Text, nullable=True)
-    default_analysts = Column(Text, nullable=True)  # JSON list, e.g. '["market","social",...]'
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    user_id = Column(String(36), primary_key=True, index=True)  # 用户 ID
+    llm_provider = Column(String(50), nullable=True)  # LLM 提供商
+    backend_url = Column(String(500), nullable=True)  # 后端 URL
+    quick_think_llm = Column(String(255), nullable=True)  # 快速思考模型（如 gpt-4o-mini）
+    deep_think_llm = Column(String(255), nullable=True)  # 深度思考模型（如 gpt-4o）
+    max_debate_rounds = Column(Integer, nullable=True)  # 最大辩论轮次
+    max_risk_discuss_rounds = Column(Integer, nullable=True)  # 最大风控讨论轮次
+    api_key_encrypted = Column(Text, nullable=True)  # 加密的 API Key
+    wecom_webhook_encrypted = Column(Text, nullable=True)  # 加密的企业微信 Webhook
+    default_analysts = Column(Text, nullable=True)  # 默认启用的分析师列表（JSON），如 '["market","social",...]'
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
 
 
 class UserTokenDB(Base):
+    """用户 API Token 数据库模型。
+    
+    存储用户生成的 API Token，用于程序化访问 API。
+    
+    字段说明：
+    - name: Token 名称（用户自定义）
+    - token: Token 哈希（HMAC-SHA256）
+    - token_hint: Token 提示（最后 4 位，用于识别）
+    - is_active: Token 是否激活
+    - last_used_at: 最后使用时间
+    
+    安全说明：
+    - Token 使用 HMAC-SHA256 哈希存储
+    - 启动时自动迁移明文 Token
+    """
     __tablename__ = "user_tokens"
 
-    id = Column(String(36), primary_key=True, index=True)
-    user_id = Column(String(36), index=True, nullable=False)
-    name = Column(String(50), nullable=False)
-    token = Column(String(128), unique=True, index=True, nullable=False)
-    token_hint = Column(String(8), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)
-    last_used_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True, index=True)  # Token ID
+    user_id = Column(String(36), index=True, nullable=False)  # 用户 ID
+    name = Column(String(50), nullable=False)  # Token 名称
+    token = Column(String(128), unique=True, index=True, nullable=False)  # Token 哈希
+    token_hint = Column(String(8), nullable=True)  # Token 提示（最后 4 位）
+    is_active = Column(Boolean, default=True, nullable=False)  # 激活状态
+    last_used_at = Column(DateTime, nullable=True)  # 最后使用时间
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
 
 
 class VersionStatsDB(Base):
+    """版本统计数据模型。
+    
+    记录系统版本使用情况，用于统计分析。
+    
+    字段说明：
+    - version: 系统版本号
+    - nonce: 随机数（防重复统计）
+    - remote_ip: 客户端 IP
+    """
     __tablename__ = "version_stats"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    version = Column(String(50), nullable=True)
-    nonce = Column(String(64), nullable=True)
-    remote_ip = Column(String(45), nullable=True, index=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    id = Column(Integer, primary_key=True, autoincrement=True)  # 自增主键
+    version = Column(String(50), nullable=True)  # 版本号
+    nonce = Column(String(64), nullable=True)  # 随机数
+    remote_ip = Column(String(45), nullable=True, index=True)  # 客户端 IP
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
 
 
 class WatchlistItemDB(Base):
-    """User watchlist items."""
+    """自选股数据库模型。
+    
+    存储用户的自选股列表。
+    
+    约束：
+    - 每个用户对同一标的只能添加一次（唯一约束）
+    """
     __tablename__ = "watchlist_items"
 
-    id = Column(String(36), primary_key=True)
-    user_id = Column(String(64), index=True, nullable=False)
-    symbol = Column(String(20), nullable=False)
-    sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True)  # 自选股 ID
+    user_id = Column(String(64), index=True, nullable=False)  # 用户 ID
+    symbol = Column(String(20), nullable=False)  # 股票代码
+    sort_order = Column(Integer, default=0)  # 排序顺序
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
 
-    __table_args__ = (UniqueConstraint('user_id', 'symbol', name='uq_watchlist_user_symbol'),)
+    __table_args__ = (UniqueConstraint('user_id', 'symbol', name='uq_watchlist_user_symbol'),)  # 唯一约束
 
 
 class ScheduledAnalysisDB(Base):
-    """Scheduled daily analysis tasks."""
+    """定时分析任务数据库模型。
+    
+    存储用户的定时分析任务配置。
+    
+    字段说明：
+    - symbol: 股票代码
+    - horizon: 分析周期（short/medium）
+    - trigger_time: 触发时间（HH:MM 格式）
+    - is_active: 是否激活
+    - last_run_date: 最后运行日期
+    - last_run_status: 最后运行状态
+    - last_report_id: 最后生成的研报 ID
+    - consecutive_failures: 连续失败次数
+    
+    约束：
+    - 每个用户对同一标的只能设置一个定时任务（唯一约束）
+    """
     __tablename__ = "scheduled_analyses"
 
-    id = Column(String(36), primary_key=True)
-    user_id = Column(String(64), index=True, nullable=False)
-    symbol = Column(String(20), nullable=False)
-    horizon = Column(String(10), default="short")
-    trigger_time = Column(String(5), default="20:00")
-    is_active = Column(Boolean, default=True)
-    last_run_date = Column(String(10), nullable=True)
-    last_run_status = Column(String(10), nullable=True)
-    last_report_id = Column(String(36), nullable=True)
-    consecutive_failures = Column(Integer, default=0)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True)  # 任务 ID
+    user_id = Column(String(64), index=True, nullable=False)  # 用户 ID
+    symbol = Column(String(20), nullable=False)  # 股票代码
+    horizon = Column(String(10), default="short")  # 分析周期
+    trigger_time = Column(String(5), default="20:00")  # 触发时间
+    is_active = Column(Boolean, default=True)  # 激活状态
+    last_run_date = Column(String(10), nullable=True)  # 最后运行日期
+    last_run_status = Column(String(10), nullable=True)  # 最后运行状态
+    last_report_id = Column(String(36), nullable=True)  # 最后研报 ID
+    consecutive_failures = Column(Integer, default=0)  # 连续失败次数
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
 
-    __table_args__ = (UniqueConstraint('user_id', 'symbol', name='uq_scheduled_user_symbol'),)
+    __table_args__ = (UniqueConstraint('user_id', 'symbol', name='uq_scheduled_user_symbol'),)  # 唯一约束
 
 
 class SponsorDB(Base):
-    """Sponsor records managed by admin project."""
+    """赞助者数据库模型。
+    
+    存储项目赞助者信息，由管理员维护。
+    
+    字段说明：
+    - sponsor_type: 赞助类型（money/token）
+    - name: 赞助者名称
+    - github: GitHub 用户名
+    - avatar: 头像 URL
+    - email: 邮箱
+    - provider: Token 赞助时的提供商名称
+    - amount: 金额（仅管理员可见，不暴露在公开 API）
+    - date: 赞助日期
+    - sort_order: 排序顺序
+    - is_visible: 是否公开显示
+    """
     __tablename__ = "sponsors"
 
-    id = Column(String(36), primary_key=True, index=True)
-    sponsor_type = Column(String(20), nullable=False, index=True)  # money | token
-    name = Column(String(100), nullable=False)
-    github = Column(String(100), nullable=True)
-    avatar = Column(String(500), nullable=True)
-    email = Column(String(255), nullable=True)
-    provider = Column(String(100), nullable=True)       # token sponsor: provider name
-    amount = Column(Float, nullable=True)                # admin-only, NOT exposed in public API
-    date = Column(String(10), nullable=False)
-    sort_order = Column(Integer, default=0)
-    is_visible = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True, index=True)  # 赞助记录 ID
+    sponsor_type = Column(String(20), nullable=False, index=True)  # 赞助类型：money | token
+    name = Column(String(100), nullable=False)  # 名称
+    github = Column(String(100), nullable=True)  # GitHub 用户名
+    avatar = Column(String(500), nullable=True)  # 头像 URL
+    email = Column(String(255), nullable=True)  # 邮箱
+    provider = Column(String(100), nullable=True)  # Token 提供商
+    amount = Column(Float, nullable=True)  # 金额（管理员专用）
+    date = Column(String(10), nullable=False)  # 赞助日期
+    sort_order = Column(Integer, default=0)  # 排序顺序
+    is_visible = Column(Boolean, default=True, nullable=False)  # 是否可见
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
 
 
 class FeedbackDB(Base):
-    """User feedback / message board."""
+    """用户反馈数据库模型。
+    
+    存储用户提交的反馈和管理员回复。
+    
+    字段说明：
+    - subject: 反馈主题
+    - content: 反馈内容
+    - admin_reply: 管理员回复
+    - replied_at: 回复时间
+    - is_read: 是否已读
+    """
     __tablename__ = "feedbacks"
 
-    id = Column(String(36), primary_key=True, index=True)
-    user_id = Column(String(64), index=True, nullable=False)
-    user_email = Column(String(255), nullable=False)
-    subject = Column(String(200), nullable=False)
-    content = Column(Text, nullable=False)
-    admin_reply = Column(Text, nullable=True)
-    replied_at = Column(DateTime, nullable=True)
-    is_read = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True, index=True)  # 反馈 ID
+    user_id = Column(String(64), index=True, nullable=False)  # 用户 ID
+    user_email = Column(String(255), nullable=False)  # 用户邮箱
+    subject = Column(String(200), nullable=False)  # 主题
+    content = Column(Text, nullable=False)  # 内容
+    admin_reply = Column(Text, nullable=True)  # 管理员回复
+    replied_at = Column(DateTime, nullable=True)  # 回复时间
+    is_read = Column(Boolean, default=False, nullable=False)  # 是否已读
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
 
 
 class ImportedPortfolioPositionDB(Base):
-    """Imported current holdings snapshot plus recent trade points for a symbol."""
-
+    """导入持仓数据库模型。
+    
+    存储用户导入的持仓快照和近期交易点位。
+    
+    字段说明：
+    - source: 导入来源（manual/image/csv）
+    - symbol: 股票代码
+    - security_name: 证券名称
+    - current_position: 当前持仓量
+    - available_position: 可用持仓量
+    - average_cost: 平均成本
+    - market_value: 市值
+    - current_position_pct: 持仓占比
+    - trade_points_json: 交易点位（JSON 格式）
+    - trade_points_count: 交易点位数量
+    - latest_trade_at: 最近交易时间
+    - latest_trade_action: 最近交易动作
+    - last_imported_at: 最后导入时间
+    
+    约束：
+    - 每个用户对同一来源的同一标的只能有一条记录（唯一约束）
+    """
     __tablename__ = "imported_portfolio_positions"
 
-    id = Column(String(36), primary_key=True)
-    user_id = Column(String(64), index=True, nullable=False)
-    source = Column(String(32), default="manual", nullable=False)
-    symbol = Column(String(20), nullable=False)
-    security_name = Column(String(80), nullable=True)
-    current_position = Column(Float, nullable=True)
-    available_position = Column(Float, nullable=True)
-    average_cost = Column(Float, nullable=True)
-    market_value = Column(Float, nullable=True)
-    current_position_pct = Column(Float, nullable=True)
-    trade_points_json = Column(JSON, nullable=True)
-    trade_points_count = Column(Integer, default=0, nullable=False)
-    latest_trade_at = Column(String(32), nullable=True)
-    latest_trade_action = Column(String(16), nullable=True)
-    last_imported_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    id = Column(String(36), primary_key=True)  # 记录 ID
+    user_id = Column(String(64), index=True, nullable=False)  # 用户 ID
+    source = Column(String(32), default="manual", nullable=False)  # 导入来源
+    symbol = Column(String(20), nullable=False)  # 股票代码
+    security_name = Column(String(80), nullable=True)  # 证券名称
+    current_position = Column(Float, nullable=True)  # 当前持仓量
+    available_position = Column(Float, nullable=True)  # 可用持仓量
+    average_cost = Column(Float, nullable=True)  # 平均成本
+    market_value = Column(Float, nullable=True)  # 市值
+    current_position_pct = Column(Float, nullable=True)  # 持仓占比
+    trade_points_json = Column(JSON, nullable=True)  # 交易点位（JSON）
+    trade_points_count = Column(Integer, default=0, nullable=False)  # 交易点位数量
+    latest_trade_at = Column(String(32), nullable=True)  # 最近交易时间
+    latest_trade_action = Column(String(16), nullable=True)  # 最近交易动作
+    last_imported_at = Column(DateTime, nullable=True)  # 最后导入时间
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间
 
     __table_args__ = (
-        UniqueConstraint('user_id', 'source', 'symbol', name='uq_imported_portfolio_user_source_symbol'),
+        UniqueConstraint('user_id', 'source', 'symbol', name='uq_imported_portfolio_user_source_symbol'),  # 唯一约束
     )
 
 

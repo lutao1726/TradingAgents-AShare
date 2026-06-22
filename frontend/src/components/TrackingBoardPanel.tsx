@@ -5,7 +5,6 @@ import {
     ChevronUp,
     ImagePlus,
     Loader2,
-    Plus,
     RefreshCw,
     Save,
     ShieldAlert,
@@ -52,6 +51,7 @@ export default function TrackingBoardPanel() {
     const [importClearing, setImportClearing] = useState(false)
     const [importFeedback, setImportFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
     const [vlmParsing, setVlmParsing] = useState(false)
+    const [deletingSymbol, setDeletingSymbol] = useState<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const navigate = useNavigate()
 
@@ -185,24 +185,28 @@ export default function TrackingBoardPanel() {
 
     const handleDeletePosition = useCallback(async (symbol: string) => {
         if (!confirm(`确定删除持仓标的 ${symbol} 吗？`)) return
+        setDeletingSymbol(symbol)
+        setImportFeedback(null)
         try {
             await api.deletePortfolioPosition(symbol)
+            setImportFeedback({ tone: 'success', message: `已删除 ${symbol}` })
             await refreshBoard()
         } catch (e) {
-            alert(e instanceof Error ? e.message : '删除失败')
+            setImportFeedback({ tone: 'error', message: e instanceof Error ? e.message : '删除失败' })
+        } finally {
+            setDeletingSymbol(null)
         }
     }, [refreshBoard])
 
     const handleAppendPositions = useCallback(async () => {
-        const positions = parsePositionLines(positionText)
-        if (positions.length === 0) {
-            setImportFeedback({ tone: 'error', message: '未解析到有效持仓，请检查格式' })
+        if (!positionText.trim()) {
+            setImportFeedback({ tone: 'error', message: '请输入持仓信息' })
             return
         }
         setImportSaving(true)
         setImportFeedback(null)
         try {
-            const result = await api.appendPortfolioPositions({ positions, auto_apply_scheduled: true })
+            const result = await api.appendPortfolioPositions({ text: positionText, auto_apply_scheduled: true })
             const addedCount = result.added?.length ?? 0
             const skippedCount = result.skipped?.length ?? 0
             let msg = result.message || `成功添加 ${addedCount} 只标的`
@@ -218,7 +222,7 @@ export default function TrackingBoardPanel() {
         } finally {
             setImportSaving(false)
         }
-    }, [positionText, parsePositionLines, refreshBoard])
+    }, [positionText, refreshBoard])
 
     const handleImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
@@ -378,6 +382,7 @@ export default function TrackingBoardPanel() {
                     trackingError={trackingError}
                     lastQuoteTime={lastQuoteTime}
                     onDeletePosition={handleDeletePosition}
+                    deletingSymbol={deletingSymbol}
                 />
             ) : (
                 <DetailedBoardView
@@ -389,6 +394,7 @@ export default function TrackingBoardPanel() {
                     onAnalyze={symbol => navigate(`/analysis?symbol=${symbol}`)}
                     onOpenReport={reportId => navigate(`/reports?report=${reportId}`)}
                     onDeletePosition={handleDeletePosition}
+                    deletingSymbol={deletingSymbol}
                 />
             )}
         </div>
@@ -431,12 +437,14 @@ function SimpleBoardView({
     trackingError,
     lastQuoteTime,
     onDeletePosition,
+    deletingSymbol,
 }: {
     items: TrackingBoardItem[]
     trackingRefreshing: boolean
     trackingError: string | null
     lastQuoteTime: string | null
     onDeletePosition: (symbol: string) => void
+    deletingSymbol: string | null
 }) {
     return (
         <div className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -457,7 +465,7 @@ function SimpleBoardView({
                     </div>
 
                     {items.map(item => (
-                        <SimpleTrackingRow key={item.symbol} item={item} onDelete={() => onDeletePosition(item.symbol)} />
+                        <SimpleTrackingRow key={item.symbol} item={item} onDelete={() => onDeletePosition(item.symbol)} deleting={deletingSymbol === item.symbol} />
                     ))}
                 </div>
             </div>
@@ -474,7 +482,7 @@ function SimpleBoardView({
     )
 }
 
-function SimpleTrackingRow({ item, onDelete }: { item: TrackingBoardItem; onDelete: () => void }) {
+function SimpleTrackingRow({ item, onDelete, deleting }: { item: TrackingBoardItem; onDelete: () => void; deleting: boolean }) {
     const priceChangePct = item.price_change_pct ?? null
     const isUp = (priceChangePct ?? 0) >= 0
     const costToneClass = item.average_cost != null && item.live_price != null && item.average_cost > item.live_price
@@ -567,10 +575,11 @@ function SimpleTrackingRow({ item, onDelete }: { item: TrackingBoardItem; onDele
                 <button
                     type="button"
                     onClick={onDelete}
-                    className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"
+                    disabled={deleting}
+                    className="p-1.5 text-slate-400 hover:text-red-500 transition-colors disabled:opacity-40"
                     title="删除持仓"
                 >
-                    <Trash2 className="w-4 h-4" />
+                    {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                 </button>
             </div>
         </div>
@@ -659,6 +668,7 @@ function DetailedBoardView({
     onAnalyze,
     onOpenReport,
     onDeletePosition,
+    deletingSymbol,
 }: {
     items: TrackingBoardItem[]
     trackingRefreshing: boolean
@@ -668,6 +678,7 @@ function DetailedBoardView({
     onAnalyze: (symbol: string) => void
     onOpenReport: (reportId: string) => void
     onDeletePosition: (symbol: string) => void
+    deletingSymbol: string | null
 }) {
     return (
         <div className="space-y-4 pt-4">
@@ -705,6 +716,7 @@ function DetailedBoardView({
                             }
                         }}
                         onDelete={() => onDeletePosition(item.symbol)}
+                        deleting={deletingSymbol === item.symbol}
                     />
                 ))}
             </div>
@@ -717,11 +729,13 @@ function DetailedTrackingRow({
     onAnalyze,
     onOpenReport,
     onDelete,
+    deleting,
 }: {
     item: TrackingBoardItem
     onAnalyze: () => void
     onOpenReport: () => void
     onDelete: () => void
+    deleting: boolean
 }) {
     const priceChangePct = item.price_change_pct ?? null
     const floatingPnl = item.floating_pnl ?? null
@@ -941,8 +955,10 @@ function DetailedTrackingRow({
                             <button
                                 type="button"
                                 onClick={onDelete}
-                                className="rounded-xl border border-red-200 px-3 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20"
+                                disabled={deleting}
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 px-3 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/20 disabled:cursor-not-allowed disabled:opacity-40"
                             >
+                                {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
                                 删除
                             </button>
                         </div>

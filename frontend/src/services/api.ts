@@ -240,7 +240,7 @@ class ApiService {
     }
 
     async appendPortfolioPositions(data: {
-        positions: PortfolioPositionInput[]
+        text: string
         source?: string
         auto_apply_scheduled?: boolean
     }): Promise<PortfolioImportState & { added?: string[]; skipped?: string[]; message?: string }> {

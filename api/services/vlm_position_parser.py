@@ -1,6 +1,14 @@
-"""Parse broker position screenshots into structured position data.
+"""
+VLM 持仓解析器模块：解析券商持仓截图。
 
-Uses the generic VLM service (vlm_service.py) for image recognition.
+核心功能：
+1. 图片识别：使用 VLM 识别券商截图中的股票信息
+2. 数据提取：从识别结果中提取结构化的持仓数据
+3. 格式容错：支持 Markdown 代码块格式的响应
+
+使用场景：
+- 上传券商 App 截图自动识别持仓
+- 支持自选股列表、持仓页面等多种截图类型
 """
 from __future__ import annotations
 
@@ -12,6 +20,7 @@ from api.services.vlm_service import call_vlm
 
 logger = logging.getLogger(__name__)
 
+# VLM 提示词：指导模型如何解析截图
 POSITION_PROMPT = """你是一个股票截图解析助手。用户会上传券商 App 的截图（可能是自选股列表、持仓页面、或其他包含股票信息的页面）。
 请从图片中提取所有能识别到的 A 股股票信息，返回 JSON 数组，每个元素包含：
 - symbol: 股票代码（6位数字，如 "600519"）
@@ -30,27 +39,52 @@ def parse_position_image(
     image_bytes: bytes,
     content_type: str,
 ) -> list[dict[str, Any]]:
-    """Parse a broker screenshot and return extracted positions."""
+    """解析券商截图并返回提取的持仓数据。
+    
+    Args:
+        image_bytes: 图片字节数据
+        content_type: 图片 MIME 类型（如 image/png）
+    
+    Returns:
+        持仓数据列表，每个元素包含：
+        - symbol: 股票代码
+        - name: 股票名称
+        - current_position: 持仓数量（股）
+        - average_cost: 成本价（元）
+        - market_value: 持仓市值（元）
+    """
     raw = call_vlm(image_bytes, POSITION_PROMPT, content_type)
     return _parse_response(raw)
 
 
 def _parse_response(raw: str) -> list[dict[str, Any]]:
-    """Extract JSON array from VLM response, tolerating markdown fences."""
+    """从 VLM 响应中提取 JSON 数组（容错 Markdown 代码块）。
+    
+    Args:
+        raw: VLM 原始响应文本
+    
+    Returns:
+        持仓数据列表
+    """
     text = raw.strip()
+    
+    # 去除 Markdown 代码块标记
     if text.startswith("```"):
         lines = text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
         text = "\n".join(lines).strip()
+    
+    # 解析 JSON
     try:
         items = json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("[vlm-parser] Failed to parse VLM response as JSON: %s", text[:200])
+        logger.warning("[vlm-parser] 无法将 VLM 响应解析为 JSON: %s", text[:200])
         return []
 
     if not isinstance(items, list):
         return []
 
+    # 提取有效数据
     result = []
     for item in items:
         if not isinstance(item, dict):
@@ -69,6 +103,7 @@ def _parse_response(raw: str) -> list[dict[str, Any]]:
 
 
 def _to_float(val: Any) -> float | None:
+    """安全转换为浮点数。"""
     if val is None:
         return None
     try:

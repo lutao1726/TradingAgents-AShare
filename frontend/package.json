@@ -16,6 +16,8 @@
     "@xyflow/react": "^12.10.2",
     "clsx": "^2.1.0",
     "date-fns": "^4.1.0",
+    "html2canvas-pro": "^2.0.3",
+    "jspdf": "^4.2.1",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",

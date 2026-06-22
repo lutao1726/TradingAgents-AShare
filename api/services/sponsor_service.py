@@ -1,8 +1,13 @@
-"""Sponsor service: public read operations.
+"""
+赞助服务模块：提供公开的赞助者读取操作。
 
-Sponsor records are managed by the admin project directly in the database.
-This service only provides read access for the public-facing thanks page.
-The `amount` field is intentionally excluded from all public queries.
+核心功能：
+1. 赞助者列表：获取可见的赞助者列表（可按类型筛选）
+
+设计说明：
+- 赞助者记录由管理后台直接在数据库中管理
+- 本服务仅提供公开的读取访问
+- `amount` 字段故意排除在所有公开查询之外（隐私保护）
 """
 from __future__ import annotations
 
@@ -17,7 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 def list_sponsors(db: Session, sponsor_type: Optional[str] = None) -> list[SponsorDB]:
-    """List visible sponsors, optionally filtered by type (money/token)."""
+    """获取可见的赞助者列表。
+    
+    Args:
+        db: 数据库会话
+        sponsor_type: 赞助类型筛选（money/token），None 表示全部
+    
+    Returns:
+        赞助者列表（按排序顺序和日期降序）
+    """
     q = db.query(SponsorDB).filter(SponsorDB.is_visible.is_(True))
     if sponsor_type:
         q = q.filter(SponsorDB.sponsor_type == sponsor_type)

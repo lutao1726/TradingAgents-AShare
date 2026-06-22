@@ -1,7 +1,28 @@
-"""Email report rendering and delivery service.
+"""
+邮件报告服务模块：渲染分析报告为 HTML 邮件并发送。
 
-Renders analysis reports as HTML emails and sends them via SMTP,
-reusing the same mail environment variables as auth_service.
+核心功能：
+1. HTML 渲染：将研报数据渲染为精美的 HTML 邮件
+2. SMTP 发送：通过 SMTP 发送邮件
+3. 异步重试：异步发送邮件，失败后自动重试
+
+邮件内容：
+- 决策卡片：决策、置信度、方向
+- 价格信息：目标价、止损价
+- 各方观点：各分析师的判断摘要
+- 关键指标：财务/估值指标
+- 风险提示：风险项列表
+- 最终交易决策：完整的决策文本
+
+环境变量：
+- MAIL_HOST/MAIL_SERVER/SMTP_HOST: SMTP 服务器
+- MAIL_PORT/SMTP_PORT: SMTP 端口
+- MAIL_USER/MAIL_USERNAME/SMTP_USER: SMTP 用户名
+- MAIL_PASS/MAIL_PASSWORD/SMTP_PASSWORD: SMTP 密码
+- MAIL_FROM/SMTP_FROM: 发件人地址
+- MAIL_STARTTLS/SMTP_TLS: 是否启用 STARTTLS
+- MAIL_SSL/MAIL_SSL_TLS: 是否启用 SSL/TLS
+- FRONTEND_URL: 前端 URL（用于生成报告链接）
 """
 from __future__ import annotations
 
@@ -24,11 +45,11 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# 辅助函数
 # ---------------------------------------------------------------------------
 
 def _get_env_alias(keys: list[str], default: str = "") -> str:
-    """Return the first non-None env var from *keys*, else *default*."""
+    """获取环境变量，支持多个别名。"""
     for k in keys:
         v = os.getenv(k)
         if v is not None:
@@ -37,14 +58,17 @@ def _get_env_alias(keys: list[str], default: str = "") -> str:
 
 
 def _escape(text: str) -> str:
-    """HTML-escape user-supplied text."""
+    """HTML 转义用户输入的文本。"""
     return html.escape(str(text))
 
 
 def _render_markdown(text: str) -> str:
-    """Convert markdown to HTML with inline styles for email clients."""
+    """将 Markdown 转换为 HTML（带内联样式）。
+    
+    为邮件客户端添加内联样式，因为大多数邮件客户端不支持 CSS 类。
+    """
     raw = _md.markdown(text, extensions=["tables"])
-    # Add inline styles for elements that email clients won't style via CSS classes
+    # 为表格添加内联样式
     raw = raw.replace("<table>",
         '<table style="width:100%;border-collapse:collapse;font-size:13px;margin:12px 0;">')
     raw = raw.replace("<thead>",
@@ -75,9 +99,13 @@ def _render_markdown(text: str) -> str:
 
 
 def _infer_frontend_url() -> str:
-    """Infer frontend URL from FRONTEND_URL or CORS_ALLOW_ORIGINS.
-
-    Priority: FRONTEND_URL env > first non-localhost CORS origin > first CORS origin > "".
+    """推断前端 URL。
+    
+    优先级：
+    1. FRONTEND_URL 环境变量
+    2. CORS_ALLOW_ORIGINS 中的第一个非 localhost 地址
+    3. CORS_ALLOW_ORIGINS 中的第一个地址
+    4. 空字符串
     """
     explicit = os.getenv("FRONTEND_URL", "").strip()
     if explicit:
@@ -86,14 +114,17 @@ def _infer_frontend_url() -> str:
     if not raw:
         return ""
     origins = [o.strip() for o in raw.split(",") if o.strip()]
-    # Prefer non-localhost origin (production URL)
+    # 优先选择非 localhost 地址（生产 URL）
     for o in origins:
         if "localhost" not in o and "127.0.0.1" not in o:
             return o
     return origins[0] if origins else ""
 
 
+# VERDICT 标记正则
 _VERDICT_RE = re.compile(r"<!--\s*VERDICT:\s*(\{[^>]+\})\s*-->")
+
+# 方向别名映射
 _DIRECTION_ALIAS = {
     "BULLISH": "看多",
     "LEAN_BULLISH": "偏多",
@@ -105,9 +136,12 @@ _DIRECTION_ALIAS = {
 
 
 def _extract_verdict(text: str) -> Optional[dict]:
-    """Extract structured verdict from agent report HTML comment.
-
-    Returns {"direction": "看多", "reason": "..."} or None.
+    """从报告 HTML 注释中提取结构化 VERDICT。
+    
+    格式：<!-- VERDICT: {"direction": "BULLISH", "reason": "..."} -->
+    
+    Returns:
+        {"direction": "看多", "reason": "..."} 或 None
     """
     m = _VERDICT_RE.search(text)
     if not m:
@@ -118,6 +152,7 @@ def _extract_verdict(text: str) -> Optional[dict]:
         reason = parsed.get("reason", "")
         if not direction or not reason:
             return None
+        # 将英文方向转换为中文
         direction = _DIRECTION_ALIAS.get(direction.upper(), direction)
         return {"direction": direction, "reason": reason.strip()[:42]}
     except (json.JSONDecodeError, AttributeError):
@@ -125,9 +160,10 @@ def _extract_verdict(text: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# HTML rendering
+# HTML 渲染
 # ---------------------------------------------------------------------------
 
+# 方向颜色映射
 _DIRECTION_COLOR = {
     "看多": "#16a34a",
     "偏多": "#65a30d",
@@ -139,18 +175,21 @@ _DIRECTION_COLOR = {
     "谨慎": "#f59e0b",
 }
 
+# 风险等级颜色映射
 _RISK_LEVEL_COLORS = {
     "high": "#dc2626",
     "medium": "#f59e0b",
     "low": "#16a34a",
 }
 
+# 关键指标状态颜色映射
 _KEY_METRIC_STATUS_COLORS = {
     "good": "#16a34a",
     "neutral": "#6b7280",
     "bad": "#dc2626",
 }
 
+# 分析师报告区块
 _AGENT_SECTIONS = [
     ("market_report", "市场分析"),
     ("sentiment_report", "舆情分析"),
@@ -166,7 +205,16 @@ _GITHUB_URL = "https://github.com/KylinMountain/TradingAgents-AShare"
 
 
 def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: str = "") -> str:
-    """Render a *ReportDB* instance as an HTML email string with inline CSS."""
+    """将研报渲染为 HTML 邮件字符串（带内联 CSS）。
+    
+    Args:
+        report: 研报数据库对象
+        frontend_url: 前端 URL（用于生成报告链接）
+        stock_name: 股票名称
+    
+    Returns:
+        HTML 邮件字符串
+    """
 
     symbol = _escape(report.symbol or "")
     name = _escape(stock_name) if stock_name and stock_name != report.symbol else ""
@@ -402,82 +450,116 @@ def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: s
 
 
 # ---------------------------------------------------------------------------
-# SMTP sending
+# SMTP 发送
 # ---------------------------------------------------------------------------
 
 def send_report_email(user: "UserDB", report: "ReportDB", stock_name: str = "") -> bool:
-    """Send the rendered report email via SMTP.
-
-    Returns True on success, False on failure.  Never raises.
+    """通过 SMTP 发送渲染后的报告邮件。
+    
+    流程：
+    1. 检查 SMTP 配置
+    2. 渲染 HTML 邮件
+    3. 构建邮件消息（纯文本 + HTML）
+    4. 通过 SMTP 发送
+    
+    Args:
+        user: 用户对象
+        report: 研报对象
+        stock_name: 股票名称
+    
+    Returns:
+        是否发送成功（失败不抛异常）
     """
     smtp_host = _get_env_alias(["MAIL_HOST", "MAIL_SERVER", "SMTP_HOST"]).strip()
     if not smtp_host:
-        logger.info("[email_report] SMTP not configured, skipping send")
+        logger.info("[email_report] SMTP 未配置，跳过发送")
         return False
 
+    # SMTP 配置
     smtp_port = int(_get_env_alias(["MAIL_PORT", "SMTP_PORT"]) or "587")
     smtp_user = _get_env_alias(["MAIL_USER", "MAIL_USERNAME", "SMTP_USER"]).strip()
     smtp_password = _get_env_alias(["MAIL_PASS", "MAIL_PASSWORD", "SMTP_PASSWORD"]).strip()
     smtp_from = _get_env_alias(["MAIL_FROM", "SMTP_FROM"], smtp_user or "noreply@example.com").strip()
 
+    # STARTTLS 配置
     smtp_starttls_str = _get_env_alias(["MAIL_STARTTLS", "SMTP_TLS"], "1").strip().lower()
     smtp_starttls = smtp_starttls_str not in ("0", "false", "off", "no")
 
+    # SSL/TLS 配置
     smtp_ssl_tls_str = _get_env_alias(["MAIL_SSL", "MAIL_SSL_TLS"], "0").strip().lower()
     smtp_ssl_tls = smtp_ssl_tls_str in ("1", "true", "on", "yes")
 
+    # 渲染 HTML 邮件
     frontend_url = _infer_frontend_url()
     html_body = render_report_html(report, frontend_url=frontend_url, stock_name=stock_name)
+    
+    # 构建邮件主题
     symbol = report.symbol or ""
     trade_date = report.trade_date or ""
     display_name = f"{stock_name} {symbol}" if stock_name and stock_name != symbol else symbol
 
+    # 构建报告链接
     report_link = ""
     if frontend_url:
         report_link = f"\n\n查看完整报告: {frontend_url.rstrip('/')}/reports?report={report.id}"
 
+    # 构建邮件消息
     msg = EmailMessage()
     msg["Subject"] = f"TradingAgents 投研报告 - {display_name} ({trade_date})"
     msg["From"] = smtp_from
     msg["To"] = user.email
 
-    # text/plain fallback
+    # 纯文本回退内容
     plain = f"TradingAgents 投研报告\n{display_name} {trade_date}\n决策: {report.decision or '-'}\n方向: {report.direction or '-'}\n置信度: {report.confidence or '-'}%{report_link}\n\n请使用支持 HTML 的邮件客户端查看完整报告。"
     msg.set_content(plain)
     msg.add_alternative(html_body, subtype="html")
 
     try:
-        logger.info(f"[email_report] sending to {user.email} via {smtp_host}:{smtp_port}")
+        logger.info(f"[email_report] 正在发送到 {user.email}，服务器 {smtp_host}:{smtp_port}")
         smtp_cls = smtplib.SMTP_SSL if smtp_ssl_tls else smtplib.SMTP
         with smtp_cls(smtp_host, smtp_port, timeout=20) as server:
             if smtp_starttls and not smtp_ssl_tls:
-                server.starttls()
+                server.starttls()  # 启用 STARTTLS
             if smtp_user:
-                server.login(smtp_user, smtp_password)
-            server.send_message(msg)
-        logger.info(f"[email_report] sent OK to {user.email}")
+                server.login(smtp_user, smtp_password)  # 登录
+            server.send_message(msg)  # 发送邮件
+        logger.info(f"[email_report] 发送成功到 {user.email}")
         return True
     except Exception as e:
-        logger.error(f"[email_report] failed to send to {user.email}: {e}")
+        logger.error(f"[email_report] 发送到 {user.email} 失败: {e}")
         return False
 
 
 # ---------------------------------------------------------------------------
-# Async wrapper with retry
+# 异步重试包装器
 # ---------------------------------------------------------------------------
 
 async def send_report_email_with_retry(user: "UserDB", report: "ReportDB", stock_name: str = "") -> bool:
-    """Send report email asynchronously, retrying once on failure after 180 s."""
+    """异步发送报告邮件，失败后自动重试。
+    
+    流程：
+    1. 第一次尝试发送
+    2. 失败后等待 180 秒
+    3. 第二次尝试发送
+    
+    Args:
+        user: 用户对象
+        report: 研报对象
+        stock_name: 股票名称
+    
+    Returns:
+        是否发送成功
+    """
     ok = await asyncio.to_thread(send_report_email, user, report, stock_name)
     if ok:
-        logger.info(f"[email_report] first attempt succeeded for {user.email}")
+        logger.info(f"[email_report] 第一次尝试成功 {user.email}")
         return True
 
-    logger.warning(f"[email_report] first attempt failed for {user.email}, retrying in 180s")
+    logger.warning(f"[email_report] 第一次尝试失败 {user.email}，180 秒后重试")
     await asyncio.sleep(180)
     ok = await asyncio.to_thread(send_report_email, user, report, stock_name)
     if ok:
-        logger.info(f"[email_report] retry succeeded for {user.email}")
+        logger.info(f"[email_report] 重试成功 {user.email}")
     else:
-        logger.error(f"[email_report] retry also failed for {user.email}")
+        logger.error(f"[email_report] 重试也失败 {user.email}")
     return ok
