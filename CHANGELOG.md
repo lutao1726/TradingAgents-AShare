@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.5.1] - 2026-05-26
+
+### Added
+- **持仓管理增强**
+  - 追加新标的功能：`POST /v1/portfolio/imports/append`，仅添加新标的，保留原有持仓
+  - 删除单个持仓功能：`DELETE /v1/portfolio/imports/{symbol}`，简洁版和详细版视图均支持
+  - 持仓管理界面增加蓝色"追加新标的"按钮和每行"删除"按钮
+  - 删除操作带 loading 状态反馈（旋转动画），防止重复点击
+- **股票代码自动识别扩展**
+  - 新增 `5xxxxx`（沪市基金/ETF）、`15xxxx`/`16xxxx`（深市基金/ETF）代码识别
+  - 新增 `11xxxx`/`13xxxx`（沪市可转债）、`12xxxx`（深市可转债）代码识别
+  - 新增 `9xxxxx`（北交所）代码识别
+- **文档**
+  - 新增 `AGENTS.md` 架构文档，详细描述 15 名 Agent 的角色定义、职责边界、数据来源、LLM 策略、协作流程及前端架构
+
+### Changed
+- 追加新标的后自动重新计算所有持仓的 `current_position_pct`，确保占比数据准确
+- 删除操作统一使用 `importFeedback` 状态显示成功/失败消息，替代 `alert()` 弹窗
+- 前端 `appendPortfolioPositions` 改为发送原始文本，由后端统一解析，减少前后端解析逻辑重复
+
+### Fixed
+- 修复追加持仓 API 前端发送格式 `{ positions: [...] }` 与后端期望 `{ text: "..." }` 不匹配导致的 422 错误
+- 修复 `_normalize_code` 不识别 `15xxxx` 等基金代码导致追加/保存持仓时标的被静默跳过的问题
+- 修复 `PortfolioSyncRequest` 请求模型和 `_parse_positions_text` 解析函数缺失导致追加端点无法工作的问题
+
 ## [v0.5.0] - 2026-03-22
 
 ### Added

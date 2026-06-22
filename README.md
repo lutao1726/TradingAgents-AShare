@@ -37,6 +37,15 @@
 
 支持导入持仓数据，自动记录持仓、成本价与仓位占比，并可一键将持仓标的补齐到定时分析列表。控制台会展示跟踪看板摘要，完整看板页支持查看实时价格、当日区间、持仓盈亏与上一交易日报告区间，方便盘中快速跟踪。
 
+持仓管理支持多种操作方式：
+- **全量保存**：替换所有持仓（适合首次导入或批量更新）
+- **追加新标的**：仅添加新标的，保留原有持仓（适合逐步建仓）
+- **删除单个持仓**：按标的代码精准删除（支持简洁版和详细版视图）
+- **清空持仓**：一键清除所有持仓
+- **截图识别**：上传券商持仓截图，AI 自动解析并填充到编辑框
+
+系统自动识别沪深北交所股票、ETF 基金、可转债等全品种代码，输入纯数字即可自动映射交易所后缀。
+
 ### 结构化研报管理
 
 分析结果结构化存储，支持按标的、日期检索历史研报，决策卡片一目了然地展示方向、置信度、目标价与止损价。
@@ -69,7 +78,7 @@ TradingAgents 模拟真实交易机构的部门协作，将复杂任务拆解为
 *图中仅展示核心节点，完整流程包含 14 名智能体。
 
 ### 分析师团队
-基本面、情绪、新闻、技术、宏观、主力资金 6 大维度同步作业，对市场数据进行深度提取与初步评估。
+基本面、情绪、新闻、技术、宏观、主力资金、量价 7 大维度同步作业，对市场数据进行深度提取与初步评估。
 
 <p align="center">
   <img src="assets/analyst.png" width="90%">
@@ -136,6 +145,10 @@ cd ..
 ```bash
 # 启动后端
 uv run python -m uvicorn api.main:app --port 8000
+# 终端 2：调度器进程
+uv run python -m scheduler.main
+# 或
+uv run tradingagents-scheduler
 ```
 
 访问 `http://localhost:8000` 即可开始 AI 投研之旅。
@@ -151,8 +164,15 @@ uv run python -m uvicorn api.main:app --port 8000
 | 获取结果 | `GET /v1/jobs/{job_id}/result` |
 | 历史检索 | `GET /v1/reports` |
 | 批量获取最新报告 | `POST /v1/reports/latest-by-symbols` |
-| 持仓导入 | `GET/POST/DELETE /v1/portfolio/imports` |
+| 持仓查询 | `GET /v1/portfolio/imports` |
+| 全量保存持仓 | `POST /v1/portfolio/imports` |
+| 追加新标的 | `POST /v1/portfolio/imports/append` |
+| 删除单个持仓 | `DELETE /v1/portfolio/imports/{symbol}` |
+| 清空所有持仓 | `DELETE /v1/portfolio/imports` |
+| 截图识别持仓 | `POST /v1/portfolio/parse-image` |
 | 跟踪看板摘要/明细 | `GET /v1/dashboard/tracking-board` |
+| 自选股管理 | `GET/POST/DELETE /v1/watchlist` |
+| 定时任务管理 | `GET/POST/DELETE /v1/scheduled` |
 | 批量定时任务操作 | `PATCH /v1/scheduled/batch`、`POST /v1/scheduled/batch/delete`、`POST /v1/scheduled/batch/trigger` |
 | 模型 warmup | `POST /v1/config/warmup` |
 
