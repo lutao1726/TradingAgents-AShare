@@ -562,6 +562,7 @@ export interface RuntimeConfig {
     max_debate_rounds: number
     max_risk_discuss_rounds: number
     has_api_key?: boolean
+    has_api_key_pool?: boolean  // 新增：是否有 API Key 池
     has_wecom_webhook?: boolean
     wecom_webhook_display?: string | null
     server_fallback_enabled?: boolean
@@ -574,6 +575,7 @@ export interface RuntimeConfigUpdateResponse {
     message: string
     applied: RuntimeConfigUpdate
     has_api_key: boolean
+    has_api_key_pool?: boolean  // 新增：Key 池状态
     current: RuntimeConfig
     warmup?: RuntimeConfigWarmup
 }
@@ -586,8 +588,10 @@ export interface RuntimeConfigUpdate {
     max_debate_rounds?: number
     max_risk_discuss_rounds?: number
     api_key?: string
+    api_key_pool?: string  // 新增：API Key 池
     wecom_webhook_url?: string
     clear_api_key?: boolean
+    clear_api_key_pool?: boolean  // 新增：是否清除 API Key 池
     clear_wecom_webhook?: boolean
     email_report_enabled?: boolean
     wecom_report_enabled?: boolean

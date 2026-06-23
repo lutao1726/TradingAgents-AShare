@@ -930,6 +930,7 @@ class UserRuntimeConfigResponse(BaseModel):
     max_debate_rounds: int
     max_risk_discuss_rounds: int
     has_api_key: bool = False
+    has_api_key_pool: bool = False  # 新增：是否有 API Key 池
     has_wecom_webhook: bool = False
     wecom_webhook_display: Optional[str] = None
     server_fallback_enabled: bool = True
@@ -948,8 +949,10 @@ class UserRuntimeConfigUpdateRequest(BaseModel):
     email_report_enabled: Optional[bool] = None
     wecom_report_enabled: Optional[bool] = None
     api_key: Optional[str] = None
+    api_key_pool: Optional[str] = None  # 新增：API Key 池（逗号分隔的多个 Key）
     wecom_webhook_url: Optional[str] = None
     clear_api_key: bool = False
+    clear_api_key_pool: bool = False  # 新增：是否清除 API Key 池
     clear_wecom_webhook: bool = False
     warmup: bool = True
     force_warmup: bool = False
@@ -1068,9 +1071,24 @@ def _user_config_overrides(user_id: Optional[str], db: Optional[Session] = None)
             value = getattr(user_cfg, key, None)
             if value is not None:
                 result[key] = value
-        api_key = auth_service.decrypt_secret(user_cfg.api_key_encrypted)
-        if api_key:
-            result["api_key"] = api_key
+        
+        # 优先使用 API Key 池（如果存在），否则使用单个 API Key
+        api_key_pool_encrypted = getattr(user_cfg, "api_key_pool_encrypted", None)
+        if api_key_pool_encrypted:
+            api_key_pool = auth_service.decrypt_secret(api_key_pool_encrypted)
+            if api_key_pool:
+                # 逗号分割并去除空白，过滤空字符串
+                keys = [k.strip() for k in api_key_pool.split(",") if k.strip()]
+                if keys:
+                    result["api_key_pool"] = keys
+                    # 为了向后兼容，也设置 api_key 为第一个 Key
+                    result["api_key"] = keys[0]
+        else:
+            # 回退到单个 API Key
+            api_key = auth_service.decrypt_secret(user_cfg.api_key_encrypted)
+            if api_key:
+                result["api_key"] = api_key
+        
         return result
 
     if db is not None:
@@ -2915,6 +2933,7 @@ async def _ai_extract_symbol_and_date_streaming(
             model=config.get("quick_think_llm"),
             base_url=config.get("backend_url"),
             api_key=config.get("api_key"),
+            api_key_pool=config.get("api_key_pool"),
         )
         prompt = f"""你是金融数据助手。从用户消息中提取以下字段并以 JSON 输出。
 
@@ -3012,6 +3031,7 @@ def _ai_extract_symbol_and_date(
             model=config.get("quick_think_llm"),
             base_url=config.get("backend_url"),
             api_key=config.get("api_key"),
+            api_key_pool=config.get("api_key_pool"),
         )
         prompt = f"""你是金融数据助手。从用户消息中提取以下字段并以 JSON 输出。
 
@@ -3641,6 +3661,7 @@ def _probe_runtime_config(config: Dict[str, Any]) -> Dict[str, str]:
             model=model,
             base_url=base_url,
             api_key=api_key,
+            api_key_pool=config.get("api_key_pool"),
             timeout=_CONFIG_PROBE_TIMEOUT_SECONDS,
             max_retries=0,
         )
@@ -3693,6 +3714,7 @@ def _invoke_runtime_warmup(
                 model=model,
                 base_url=base_url,
                 api_key=api_key,
+                api_key_pool=config.get("api_key_pool"),
                 timeout=timeout,
                 max_retries=0,
             )
@@ -3756,6 +3778,7 @@ def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntim
         max_debate_rounds=cfg["max_debate_rounds"],
         max_risk_discuss_rounds=cfg["max_risk_discuss_rounds"],
         has_api_key=bool(user_cfg and user_cfg.api_key_encrypted),
+        has_api_key_pool=bool(user_cfg and user_cfg.api_key_pool_encrypted),  # 新增：Key 池状态
         has_wecom_webhook=bool(webhook_url),
         wecom_webhook_display=_mask_wecom_webhook(webhook_url),
         server_fallback_enabled=bool(cfg.get("server_fallback_enabled", True)),
@@ -3838,8 +3861,10 @@ def update_runtime_config(
         max_debate_rounds=updates.max_debate_rounds,
         max_risk_discuss_rounds=updates.max_risk_discuss_rounds,
         api_key=updates.api_key,
+        api_key_pool=updates.api_key_pool,  # 新增：API Key 池
         wecom_webhook_url=normalized_wecom_webhook,
         clear_api_key=updates.clear_api_key,
+        clear_api_key_pool=updates.clear_api_key_pool,  # 新增：清除 API Key 池
         clear_wecom_webhook=updates.clear_wecom_webhook,
         default_analysts=updates.default_analysts,
     )
@@ -3900,6 +3925,7 @@ def update_runtime_config(
         "message": "用户配置已更新",
         "applied": filtered,
         "has_api_key": bool(row.api_key_encrypted),
+        "has_api_key_pool": bool(row.api_key_pool_encrypted),  # 新增：Key 池状态
         "current": current_cfg,
         "warmup": warmup_payload,
     }

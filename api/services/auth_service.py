@@ -226,29 +226,33 @@ def upsert_login_code(db: Session, email: str, purpose: str = "login") -> str:
 
 
 def verify_login_code(db: Session, email: str, code: str, purpose: str = "login", client_ip: Optional[str] = None) -> Optional[UserDB]:
-    """验证登录验证码并完成登录/注册。
-    
+    """验证登录验证码并完成登录（不自动注册）。
+
     流程：
     1. 查询该邮箱最新的未消费验证码
     2. 检查是否过期
     3. 验证码哈希比对
     4. 标记验证码为已消费
-    5. 查询或创建用户
-    6. 更新用户的最后登录时间和 IP
-    
+    5. **要求邮箱必须已存在于 users 表**（白名单），否则视为未授权
+    6. 校验账户处于激活状态
+    7. 更新用户的最后登录时间和 IP
+
+    失败时统一返回 None（包含：验证码不存在/过期/错误、邮箱未注册、账户已停用），
+    避免通过错误信息区分未注册与验证码错误，防止邮箱枚举攻击。
+
     Args:
         db: 数据库会话
         email: 用户邮箱
         code: 用户输入的验证码
         purpose: 验证码用途
         client_ip: 客户端 IP
-    
+
     Returns:
-        用户对象，验证失败返回 None
+        用户对象；验证失败或邮箱未注册返回 None
     """
     email = normalize_email(email)
     now = _utcnow()
-    
+
     # 查询该邮箱最新的未消费验证码
     code_row = (
         db.query(EmailVerificationCodeDB)
@@ -260,39 +264,32 @@ def verify_login_code(db: Session, email: str, code: str, purpose: str = "login"
         .order_by(EmailVerificationCodeDB.created_at.desc())
         .first()
     )
-    
+
     # 检查验证码是否存在且未过期
     expires_at = _as_utc(code_row.expires_at) if code_row else None
     if not code_row or not expires_at or expires_at < now:
         return None  # 验证码不存在或已过期
-    
+
     # 验证码哈希比对
     if code_row.code_hash != hash_code(email, code):
         return None  # 验证码不匹配
 
     # 标记验证码为已消费
     code_row.consumed_at = now
-    
-    # 查询或创建用户
+
+    # 白名单：邮箱必须已存在于 users 表，否则拒绝登录
     user = get_user_by_email(db, email)
-    if not user:
-        # 新用户：自动注册
-        user = UserDB(
-            id=str(uuid4()),
-            email=email,
-            is_active=True,
-            created_at=now,
-            updated_at=now,
-            last_login_at=now,
-            last_login_ip=client_ip,
-        )
-        db.add(user)
-    else:
-        # 已有用户：更新登录信息
-        user.last_login_at = now
-        user.last_login_ip = client_ip
-        user.updated_at = now
-    
+    if not user or not user.is_active:
+        # 回滚验证码的消费标记，避免被锁定的验证码无法再次使用
+        code_row.consumed_at = None
+        db.commit()
+        return None
+
+    # 已有且激活的用户：更新登录信息
+    user.last_login_at = now
+    user.last_login_ip = client_ip
+    user.updated_at = now
+
     db.commit()
     db.refresh(user)
     return user
@@ -394,8 +391,10 @@ def upsert_user_llm_config(
     max_debate_rounds: Optional[int] = None,
     max_risk_discuss_rounds: Optional[int] = None,
     api_key: Optional[str] = None,
+    api_key_pool: Optional[str] = None,  # 新增：API Key 池（逗号分隔的多个 Key）
     wecom_webhook_url: Optional[str] = None,
     clear_api_key: bool = False,
+    clear_api_key_pool: bool = False,  # 新增：是否清除 API Key 池
     clear_wecom_webhook: bool = False,
     default_analysts: Optional[list] = None,
 ) -> UserLLMConfigDB:
@@ -411,8 +410,10 @@ def upsert_user_llm_config(
         max_debate_rounds: 最大辩论轮次
         max_risk_discuss_rounds: 最大风控讨论轮次
         api_key: LLM API Key（将被加密存储）
+        api_key_pool: API Key 池（逗号分隔的多个 Key，用于并发优化）
         wecom_webhook_url: 企业微信 Webhook URL（将被加密存储）
         clear_api_key: 是否清除 API Key
+        clear_api_key_pool: 是否清除 API Key 池
         clear_wecom_webhook: 是否清除企业微信 Webhook
         default_analysts: 默认启用的分析师列表
     
@@ -446,6 +447,12 @@ def upsert_user_llm_config(
         row.api_key_encrypted = None
     elif api_key:
         row.api_key_encrypted = encrypt_secret(api_key)
+
+    # 处理 API Key 池（加密存储或清除）
+    if clear_api_key_pool:
+        row.api_key_pool_encrypted = None
+    elif api_key_pool:
+        row.api_key_pool_encrypted = encrypt_secret(api_key_pool)
 
     # 处理企业微信 Webhook（加密存储或清除）
     if clear_wecom_webhook:

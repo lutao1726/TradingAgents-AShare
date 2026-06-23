@@ -115,7 +115,7 @@ class TradingAgentsGraph:
         # Create tool nodes
         self.tool_nodes = self._create_tool_nodes()
 
-        # Data collector — fetches once, shared across dual-horizon runs
+        # Data collector - fetches once, shared across dual-horizon runs
         self.data_collector = data_collector if data_collector is not None else DataCollector()
 
         # Initialize components
@@ -176,10 +176,15 @@ class TradingAgentsGraph:
             if api_key:
                 kwargs["api_key"] = api_key
 
-        elif provider == "anthropic":
+        elif provider in ("anthropic", "xai"):
             api_key = self.config.get("api_key")
             if api_key:
                 kwargs["api_key"] = api_key
+
+        # 处理 API Key 池（如果有）
+        api_key_pool = self.config.get("api_key_pool")
+        if api_key_pool:
+            kwargs["api_key_pool"] = api_key_pool
 
         return kwargs
 
@@ -302,8 +307,8 @@ class TradingAgentsGraph:
     ) -> Dict[str, Any]:
         """Run a single integrated analysis.
 
-        Each analyst uses its own natural time window (technical/funds → short,
-        fundamentals/macro → medium). The graph runs once; Research Manager
+        Each analyst uses its own natural time window (technical/funds 鈫?short,
+        fundamentals/macro 鈫?medium). The graph runs once; Research Manager
         synthesizes both short and long term perspectives.
 
         Returns a dict with short_term result and user_intent.
@@ -326,7 +331,7 @@ class TradingAgentsGraph:
             }
 
         # Pre-collect data once (always full data); analysts will read from cache
-        print(f"[TradingAgentsGraph] Collecting data for {ticker} {trade_date}…")
+        print(f"[TradingAgentsGraph] Collecting data for {ticker} {trade_date}")
         self.data_collector.collect(ticker, trade_date)
 
         graph_args = self.propagator.get_graph_args()
@@ -486,3 +491,4 @@ class TradingAgentsGraph:
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""
         return self.signal_processor.process_signal(full_signal)
+

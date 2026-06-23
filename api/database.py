@@ -196,7 +196,7 @@ def _ensure_user_schema() -> None:
     
     新增列：
     - users 表：last_login_ip, email_report_enabled, wecom_report_enabled
-    - user_llm_configs 表：wecom_webhook_encrypted, default_analysts
+    - user_llm_configs 表：wecom_webhook_encrypted, default_analysts, api_key_pool_encrypted
     """
     try:
         with engine.begin() as conn:
@@ -215,6 +215,8 @@ def _ensure_user_schema() -> None:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN wecom_webhook_encrypted TEXT"))
             if "default_analysts" not in llm_columns:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN default_analysts TEXT"))
+            if "api_key_pool_encrypted" not in llm_columns:
+                conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN api_key_pool_encrypted TEXT"))
     except Exception as e:
         logger.error("确保用户表 Schema 失败: %s", e)
 
@@ -538,7 +540,8 @@ class UserLLMConfigDB(Base):
     deep_think_llm = Column(String(255), nullable=True)  # 深度思考模型（如 gpt-4o）
     max_debate_rounds = Column(Integer, nullable=True)  # 最大辩论轮次
     max_risk_discuss_rounds = Column(Integer, nullable=True)  # 最大风控讨论轮次
-    api_key_encrypted = Column(Text, nullable=True)  # 加密的 API Key
+    api_key_encrypted = Column(Text, nullable=True)  # 加密的 API Key（单个 Key，向后兼容）
+    api_key_pool_encrypted = Column(Text, nullable=True)  # 加密的 API Key 池（逗号分隔的多个 Key，用于并发优化）
     wecom_webhook_encrypted = Column(Text, nullable=True)  # 加密的企业微信 Webhook
     default_analysts = Column(Text, nullable=True)  # 默认启用的分析师列表（JSON），如 '["market","social",...]'
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间

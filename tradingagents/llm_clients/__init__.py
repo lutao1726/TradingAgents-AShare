@@ -26,5 +26,14 @@ LLM 客户端模块：提供统一的大语言模型客户端接口。
 """
 from .base_client import BaseLLMClient
 from .factory import create_llm_client
+from .key_pool import KeyPool, create_pool_from_string, get_key_for_request
+from .key_pool_client import KeyPoolClientWrapper
 
-__all__ = ["BaseLLMClient", "create_llm_client"]
+__all__ = [
+    "BaseLLMClient",
+    "create_llm_client",
+    "KeyPool",
+    "create_pool_from_string",
+    "get_key_for_request",
+    "KeyPoolClientWrapper",
+]

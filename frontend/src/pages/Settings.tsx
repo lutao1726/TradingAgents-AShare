@@ -44,6 +44,8 @@ export default function Settings() {
     const [customPrompt, setCustomPrompt] = useState('')
     const [llmApiKey, setLlmApiKey] = useState('')
     const [hasStoredApiKey, setHasStoredApiKey] = useState(false)
+    const [apiKeyPool, setApiKeyPool] = useState('')  // 新增：API Key 池
+    const [hasStoredApiKeyPool, setHasStoredApiKeyPool] = useState(false)  // 新增：是否有存储的 Key 池
     const [wecomWebhook, setWecomWebhook] = useState('')
     const [hasStoredWebhook, setHasStoredWebhook] = useState(false)
     const [storedWebhookDisplay, setStoredWebhookDisplay] = useState('')
@@ -124,6 +126,7 @@ export default function Settings() {
                 setMaxDebateRounds(cfg.max_debate_rounds)
                 setMaxRiskRounds(cfg.max_risk_discuss_rounds)
                 setHasStoredApiKey(!!cfg.has_api_key)
+                setHasStoredApiKeyPool(!!cfg.has_api_key_pool)  // 新增：加载 Key 池状态
                 setHasStoredWebhook(!!cfg.has_wecom_webhook)
                 setStoredWebhookDisplay(cfg.wecom_webhook_display || '')
                 setServerFallbackEnabled(!!cfg.server_fallback_enabled)
@@ -202,6 +205,7 @@ export default function Settings() {
         max_debate_rounds: maxDebateRounds,
         max_risk_discuss_rounds: maxRiskRounds,
         api_key: llmApiKey || undefined,
+        api_key_pool: apiKeyPool || undefined,  // 新增：API Key 池
         ...(options?.includeWecom ? {
             wecom_webhook_url: wecomWebhook.trim() || undefined,
             wecom_report_enabled: wecomReportEnabled,
@@ -225,6 +229,7 @@ export default function Settings() {
             force_warmup: forceWarmup,
         })
         setHasStoredApiKey(!!response.has_api_key)
+        setHasStoredApiKeyPool(!!response.has_api_key_pool)  // 新增：保存 Key 池状态
         setHasStoredWebhook(!!response.current.has_wecom_webhook)
         setStoredWebhookDisplay(response.current.wecom_webhook_display || '')
         setWecomReportEnabled(response.current.wecom_report_enabled !== false)
@@ -273,6 +278,22 @@ export default function Settings() {
             setTimeout(() => setSaved(false), 2000)
         } catch (err) {
             alert(err instanceof Error ? err.message : '清除密钥失败')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const handleClearApiKeyPool = async () => {
+        if (!hasStoredApiKeyPool) return
+        setSaving(true)
+        try {
+            const response = await api.updateConfig({ clear_api_key_pool: true })
+            setHasStoredApiKeyPool(!!response.has_api_key_pool)
+            setApiKeyPool('')
+            setSaved(true)
+            setTimeout(() => setSaved(false), 2000)
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '清除 Key 池失败')
         } finally {
             setSaving(false)
         }
@@ -454,6 +475,41 @@ export default function Settings() {
                         <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
                             保存模型配置后，系统会在后台自动测试连通性；也可以直接点击下方按钮，发送\u201c你好\u201d来验证模型是否正常响应。
                         </p>
+                    </div>
+
+                    {/* 新增：API Key 池输入 */}
+                    <div className="md:col-span-2">
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                            API Key 池（可选）
+                            <span className="ml-2 text-xs text-slate-400 font-normal">用于并发优化，多个 Key 用逗号分隔</span>
+                        </label>
+                        <div className="relative">
+                            <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <textarea
+                                value={apiKeyPool}
+                                onChange={e => setApiKeyPool(e.target.value)}
+                                className="input w-full pl-10 min-h-[80px]"
+                                placeholder={hasStoredApiKeyPool ? '已保存，留空则保持不变' : '输入多个 API Key，用逗号分隔（例如：sk-key1,sk-key2,sk-key3）'}
+                                disabled={configLoading}
+                                rows={3}
+                            />
+                        </div>
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                                多 Key 池化：系统会自动轮询使用不同 Key，分散并发压力，提高请求成功率。
+                            </div>
+                            {hasStoredApiKeyPool && (
+                                <button
+                                    type="button"
+                                    onClick={handleClearApiKeyPool}
+                                    disabled={saving || saveAllSaving}
+                                    className="inline-flex items-center gap-1 text-xs text-rose-500 hover:text-rose-600 disabled:opacity-50"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    清除 Key 池
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     <div className="md:col-span-2 rounded-2xl border border-slate-200/80 dark:border-slate-700/80 bg-slate-50/80 dark:bg-slate-900/40 p-4 space-y-3">

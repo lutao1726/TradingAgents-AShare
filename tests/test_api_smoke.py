@@ -59,10 +59,35 @@ def _get_client():
 
 
 def _auth(client: TestClient) -> str:
-    """Register a test user and return a valid JWT token."""
-    r = client.post("/v1/auth/request-code", json={"email": "apitest@test.com"})
+    """注册一个测试用户（预写入 users 表），再走验证码登录，返回有效 JWT。
+
+    注意：自方案 A 起，`/v1/auth/verify-code` 不会自动注册，因此测试需要先在
+    `users` 表中预创建账户，再走验证码登录流程。
+    """
+    from api.database import UserDB, get_db_ctx, init_db
+    from api.services import auth_service
+
+    init_db()
+    email = auth_service.normalize_email(f"apitest-{uuid4().hex[:8]}@test.com")
+    now = datetime.now(timezone.utc)
+    with get_db_ctx() as db:
+        user = auth_service.get_user_by_email(db, email)
+        if not user:
+            user = UserDB(
+                id=str(uuid4()),
+                email=email,
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+                last_login_at=now,
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+
+    r = client.post("/v1/auth/request-code", json={"email": email})
     code = r.json()["dev_code"]
-    r2 = client.post("/v1/auth/verify-code", json={"email": "apitest@test.com", "code": code})
+    r2 = client.post("/v1/auth/verify-code", json={"email": email, "code": code})
     return r2.json()["access_token"]
 
 
