@@ -259,16 +259,19 @@ async def _run_manual_trigger(
 async def _send_manual_trigger_notifications(
     user_id: str, report_id: str, symbol: str
 ) -> None:
-    """Send email & WeCom notifications for manually triggered analysis."""
+    """Send email & WeCom & DingTalk notifications for manually triggered analysis."""
     try:
         from api.services.email_report_service import send_report_email_with_retry
         from api.services.wecom_notification_service import send_report_message_with_retry
+        from api.services.dingtalk_notification_service import send_report_message_with_retry as send_dingtalk_report_message_with_retry
 
         def _load_notification_targets():
             email_user = None
             report_to_send = None
             webhook_url = None
             wecom_report_enabled = True
+            dingtalk_webhook_url = None
+            dingtalk_report_enabled = True
             with get_db_ctx() as db:
                 user = db.query(UserDB).filter(UserDB.id == user_id).first()
                 report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
@@ -276,17 +279,21 @@ async def _send_manual_trigger_notifications(
                 webhook_url = auth_service.decrypt_secret(
                     getattr(user_cfg, "wecom_webhook_encrypted", None)
                 )
+                dingtalk_webhook_url = auth_service.decrypt_secret(
+                    getattr(user_cfg, "dingtalk_webhook_encrypted", None)
+                )
                 if report:
                     db.expunge(report)
                     report_to_send = report
                 if user:
                     wecom_report_enabled = getattr(user, "wecom_report_enabled", True)
+                    dingtalk_report_enabled = getattr(user, "dingtalk_report_enabled", True)
                     if getattr(user, "email_report_enabled", True):
                         db.expunge(user)
                         email_user = user
-            return email_user, report_to_send, webhook_url, wecom_report_enabled
+            return email_user, report_to_send, webhook_url, wecom_report_enabled, dingtalk_webhook_url, dingtalk_report_enabled
 
-        email_user, report_to_send, webhook_url, wecom_report_enabled = (
+        email_user, report_to_send, webhook_url, wecom_report_enabled, dingtalk_webhook_url, dingtalk_report_enabled = (
             await asyncio.to_thread(_load_notification_targets)
         )
         if email_user and report_to_send:
@@ -295,6 +302,9 @@ async def _send_manual_trigger_notifications(
         if report_to_send and webhook_url and wecom_report_enabled:
             _log(f"[Manual Trigger] Sending WeCom report for {symbol}")
             await send_report_message_with_retry(report_to_send, webhook_url)
+        if report_to_send and dingtalk_webhook_url and dingtalk_report_enabled:
+            _log(f"[Manual Trigger] Sending DingTalk report for {symbol}")
+            await send_dingtalk_report_message_with_retry(report_to_send, dingtalk_webhook_url)
     except Exception as e:
         logger.warning(f"[Manual Trigger] Notification send failed for {symbol}: {e}")
 
