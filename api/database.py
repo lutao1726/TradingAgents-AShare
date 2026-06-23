@@ -187,16 +187,16 @@ def _ensure_report_schema() -> None:
 
 def _ensure_user_schema() -> None:
     """为现有 SQLite 部署添加用户相关表的轻量级列迁移。
-    
+
     功能：
     - 检查 users 表和 user_llm_configs 表是否缺少必要列
     - 缺少时自动添加
     - 执行 API Token 哈希化迁移
     - 执行 API Key 重加密迁移
-    
+
     新增列：
-    - users 表：last_login_ip, email_report_enabled, wecom_report_enabled
-    - user_llm_configs 表：wecom_webhook_encrypted, default_analysts, api_key_pool_encrypted
+    - users 表：last_login_ip, email_report_enabled, wecom_report_enabled, dingtalk_report_enabled
+    - user_llm_configs 表：wecom_webhook_encrypted, default_analysts, api_key_pool_encrypted, dingtalk_webhook_encrypted
     """
     try:
         with engine.begin() as conn:
@@ -208,6 +208,8 @@ def _ensure_user_schema() -> None:
                 conn.execute(text("ALTER TABLE users ADD COLUMN email_report_enabled BOOLEAN NOT NULL DEFAULT 1"))
             if "wecom_report_enabled" not in columns:
                 conn.execute(text("ALTER TABLE users ADD COLUMN wecom_report_enabled BOOLEAN NOT NULL DEFAULT 1"))
+            if "dingtalk_report_enabled" not in columns:
+                conn.execute(text("ALTER TABLE users ADD COLUMN dingtalk_report_enabled BOOLEAN NOT NULL DEFAULT 1"))
             
             # 检查 user_llm_configs 表列
             llm_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(user_llm_configs)"))}
@@ -217,6 +219,8 @@ def _ensure_user_schema() -> None:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN default_analysts TEXT"))
             if "api_key_pool_encrypted" not in llm_columns:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN api_key_pool_encrypted TEXT"))
+            if "dingtalk_webhook_encrypted" not in llm_columns:
+                conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN dingtalk_webhook_encrypted TEXT"))
     except Exception as e:
         logger.error("确保用户表 Schema 失败: %s", e)
 
@@ -478,6 +482,7 @@ class UserDB(Base):
     - last_login_ip: 最后登录 IP
     - email_report_enabled: 是否启用邮件报告
     - wecom_report_enabled: 是否启用企业微信报告
+    - dingtalk_report_enabled: 是否启用钉钉报告
     """
     __tablename__ = "users"
 
@@ -490,6 +495,7 @@ class UserDB(Base):
     last_login_ip = Column(String(45), nullable=True)  # 最后登录 IP（支持 IPv6）
     email_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")  # 邮件报告开关
     wecom_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")  # 企业微信报告开关
+    dingtalk_report_enabled = Column(Boolean, default=True, nullable=False, server_default="1")  # 钉钉报告开关
 
 
 class EmailVerificationCodeDB(Base):
@@ -525,6 +531,7 @@ class UserLLMConfigDB(Base):
     - 辩论轮次配置
     - 加密的 API Key
     - 加密的企业微信 Webhook
+    - 加密的钉钉 Webhook
     - 默认启用的分析师列表
     
     安全说明：
@@ -543,6 +550,7 @@ class UserLLMConfigDB(Base):
     api_key_encrypted = Column(Text, nullable=True)  # 加密的 API Key（单个 Key，向后兼容）
     api_key_pool_encrypted = Column(Text, nullable=True)  # 加密的 API Key 池（逗号分隔的多个 Key，用于并发优化）
     wecom_webhook_encrypted = Column(Text, nullable=True)  # 加密的企业微信 Webhook
+    dingtalk_webhook_encrypted = Column(Text, nullable=True)  # 加密的钉钉 Webhook
     default_analysts = Column(Text, nullable=True)  # 默认启用的分析师列表（JSON），如 '["market","social",...]'
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # 创建时间
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))  # 更新时间

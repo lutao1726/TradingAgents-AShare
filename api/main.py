@@ -936,6 +936,9 @@ class UserRuntimeConfigResponse(BaseModel):
     server_fallback_enabled: bool = True
     email_report_enabled: bool = True
     wecom_report_enabled: bool = True
+    dingtalk_report_enabled: bool = True  # 新增：钉钉报告开关
+    has_dingtalk_webhook: bool = False  # 新增：是否有钉钉 Webhook
+    dingtalk_webhook_display: Optional[str] = None  # 新增：钉钉 Webhook 脱敏显示
     default_analysts: List[str] = Field(default_factory=lambda: ["market", "social", "news", "fundamentals", "macro", "smart_money", "volume_price"])
 
 
@@ -948,12 +951,15 @@ class UserRuntimeConfigUpdateRequest(BaseModel):
     max_risk_discuss_rounds: Optional[int] = None
     email_report_enabled: Optional[bool] = None
     wecom_report_enabled: Optional[bool] = None
+    dingtalk_report_enabled: Optional[bool] = None  # 新增：钉钉报告开关
     api_key: Optional[str] = None
     api_key_pool: Optional[str] = None  # 新增：API Key 池（逗号分隔的多个 Key）
     wecom_webhook_url: Optional[str] = None
+    dingtalk_webhook_url: Optional[str] = None  # 新增：钉钉 Webhook URL
     clear_api_key: bool = False
     clear_api_key_pool: bool = False  # 新增：是否清除 API Key 池
     clear_wecom_webhook: bool = False
+    clear_dingtalk_webhook: bool = False  # 新增：是否清除钉钉 Webhook
     warmup: bool = True
     force_warmup: bool = False
     default_analysts: Optional[List[str]] = None
@@ -981,6 +987,17 @@ class WecomWebhookWarmupRequest(BaseModel):
 
 
 class WecomWebhookWarmupResponse(BaseModel):
+    sent: bool = True
+    message: str
+    webhook_display: Optional[str] = None
+
+
+class DingtalkWebhookWarmupRequest(BaseModel):
+    dingtalk_webhook_url: Optional[str] = None
+    content: Optional[str] = None
+
+
+class DingtalkWebhookWarmupResponse(BaseModel):
     sent: bool = True
     message: str
     webhook_display: Optional[str] = None
@@ -3567,6 +3584,22 @@ def _mask_wecom_webhook(webhook_url: Optional[str]) -> Optional[str]:
     return _mask_secret_value(normalized)
 
 
+def _mask_dingtalk_webhook(webhook_url: Optional[str]) -> Optional[str]:
+    normalized = str(webhook_url or "").strip()
+    if not normalized:
+        return None
+    prefix = "https://oapi.dingtalk.com/robot/send?access_token="
+    if normalized.startswith(prefix):
+        masked_token = _mask_secret_value(normalized[len(prefix):])
+        return f"{prefix}{masked_token}"
+    if normalized.startswith("http"):
+        if "access_token=" in normalized:
+            base, token = normalized.rsplit("access_token=", 1)
+            return f"{base}access_token={_mask_secret_value(token)}"
+        return _mask_secret_value(normalized, head=18, tail=8)
+    return _mask_secret_value(normalized)
+
+
 def _warmup_model_names(config: Dict[str, Any]) -> List[str]:
     seen: set[str] = set()
     models: List[str] = []
@@ -3770,6 +3803,7 @@ def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntim
     cfg = _build_runtime_config({}, user_id=user.id if user else None, db=db)
     user_cfg = auth_service.get_user_llm_config(db, user.id) if user else None
     webhook_url = auth_service.decrypt_secret(getattr(user_cfg, "wecom_webhook_encrypted", None))
+    dingtalk_webhook_url = auth_service.decrypt_secret(getattr(user_cfg, "dingtalk_webhook_encrypted", None))
     return UserRuntimeConfigResponse(
         llm_provider=cfg["llm_provider"],
         deep_think_llm=cfg["deep_think_llm"],
@@ -3784,6 +3818,9 @@ def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntim
         server_fallback_enabled=bool(cfg.get("server_fallback_enabled", True)),
         email_report_enabled=user.email_report_enabled if user and hasattr(user, 'email_report_enabled') else True,
         wecom_report_enabled=user.wecom_report_enabled if user and hasattr(user, "wecom_report_enabled") else True,
+        dingtalk_report_enabled=user.dingtalk_report_enabled if user and hasattr(user, "dingtalk_report_enabled") else True,  # 新增：钉钉报告开关
+        has_dingtalk_webhook=bool(dingtalk_webhook_url),
+        dingtalk_webhook_display=_mask_dingtalk_webhook(dingtalk_webhook_url),
         default_analysts=json.loads(user_cfg.default_analysts) if user_cfg and user_cfg.default_analysts else ["market", "social", "news", "fundamentals", "macro", "smart_money", "volume_price"],
     )
 
@@ -3842,6 +3879,14 @@ def update_runtime_config(
             normalized_wecom_webhook = normalize_webhook_url(updates.wecom_webhook_url)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    normalized_dingtalk_webhook = None
+    if updates.dingtalk_webhook_url:
+        from api.services.dingtalk_notification_service import normalize_webhook_url as normalize_dingtalk_webhook_url
+
+        try:
+            normalized_dingtalk_webhook = normalize_dingtalk_webhook_url(updates.dingtalk_webhook_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     persistent_user = db.query(UserDB).filter(UserDB.id == current_user.id).first() or current_user
     before_cfg = _config_response_for_user(persistent_user, db)
     pending_cfg = _build_pending_runtime_config(updates, persistent_user.id, db)
@@ -3867,6 +3912,8 @@ def update_runtime_config(
         clear_api_key_pool=updates.clear_api_key_pool,  # 新增：清除 API Key 池
         clear_wecom_webhook=updates.clear_wecom_webhook,
         default_analysts=updates.default_analysts,
+        dingtalk_webhook_url=normalized_dingtalk_webhook,
+        clear_dingtalk_webhook=updates.clear_dingtalk_webhook,
     )
     user_pref_updated = False
     if updates.email_report_enabled is not None:
@@ -3874,6 +3921,9 @@ def update_runtime_config(
         user_pref_updated = True
     if updates.wecom_report_enabled is not None:
         persistent_user.wecom_report_enabled = updates.wecom_report_enabled
+        user_pref_updated = True
+    if updates.dingtalk_report_enabled is not None:
+        persistent_user.dingtalk_report_enabled = updates.dingtalk_report_enabled
         user_pref_updated = True
     if user_pref_updated:
         db.commit()
@@ -3976,6 +4026,39 @@ async def warmup_wecom_webhook(
         "sent": True,
         "message": "Webhook 测试发送成功",
         "webhook_display": _mask_wecom_webhook(webhook_url),
+    }
+
+
+@app.post("/v1/config/dingtalk/warmup", response_model=DingtalkWebhookWarmupResponse)
+async def warmup_dingtalk_webhook(
+    request: DingtalkWebhookWarmupRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    from api.services.dingtalk_notification_service import build_test_message, normalize_webhook_url, send_message
+
+    webhook_url = (request.dingtalk_webhook_url or "").strip()
+    if not webhook_url:
+        user_cfg = auth_service.get_user_llm_config(db, current_user.id)
+        webhook_url = auth_service.decrypt_secret(getattr(user_cfg, "dingtalk_webhook_encrypted", None)) or ""
+    if not webhook_url:
+        raise HTTPException(status_code=400, detail="请先填写或保存钉钉 Webhook")
+    try:
+        webhook_url = normalize_webhook_url(webhook_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        sent = await asyncio.to_thread(send_message, build_test_message(request.content), webhook_url)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Webhook 测试发送失败：{exc}") from exc
+    if not sent:
+        raise HTTPException(status_code=400, detail="Webhook 测试发送失败，请检查地址或机器人状态")
+
+    return {
+        "sent": True,
+        "message": "Webhook 测试发送成功",
+        "webhook_display": _mask_dingtalk_webhook(webhook_url),
     }
 
 

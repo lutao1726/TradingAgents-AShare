@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, DingtalkWarmupRequest, DingtalkWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse } from '@/types'
 
 export function getBaseUrl(): string {
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
@@ -298,6 +298,13 @@ class ApiService {
 
     async warmupWecom(request: WecomWarmupRequest): Promise<WecomWarmupResponse> {
         return this.request<WecomWarmupResponse>('/v1/config/wecom/warmup', {
+            method: 'POST',
+            body: JSON.stringify(request),
+        })
+    }
+
+    async warmupDingtalk(request: DingtalkWarmupRequest): Promise<DingtalkWarmupResponse> {
+        return this.request<DingtalkWarmupResponse>('/v1/config/dingtalk/warmup', {
             method: 'POST',
             body: JSON.stringify(request),
         })

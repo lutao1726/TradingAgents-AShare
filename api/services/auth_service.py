@@ -393,9 +393,11 @@ def upsert_user_llm_config(
     api_key: Optional[str] = None,
     api_key_pool: Optional[str] = None,  # 新增：API Key 池（逗号分隔的多个 Key）
     wecom_webhook_url: Optional[str] = None,
+    dingtalk_webhook_url: Optional[str] = None,  # 新增：钉钉 Webhook URL
     clear_api_key: bool = False,
     clear_api_key_pool: bool = False,  # 新增：是否清除 API Key 池
     clear_wecom_webhook: bool = False,
+    clear_dingtalk_webhook: bool = False,  # 新增：是否清除钉钉 Webhook
     default_analysts: Optional[list] = None,
 ) -> UserLLMConfigDB:
     """创建或更新用户的 LLM 配置。
@@ -412,9 +414,11 @@ def upsert_user_llm_config(
         api_key: LLM API Key（将被加密存储）
         api_key_pool: API Key 池（逗号分隔的多个 Key，用于并发优化）
         wecom_webhook_url: 企业微信 Webhook URL（将被加密存储）
+        dingtalk_webhook_url: 钉钉 Webhook URL（将被加密存储）
         clear_api_key: 是否清除 API Key
         clear_api_key_pool: 是否清除 API Key 池
         clear_wecom_webhook: 是否清除企业微信 Webhook
+        clear_dingtalk_webhook: 是否清除钉钉 Webhook
         default_analysts: 默认启用的分析师列表
     
     Returns:
@@ -459,6 +463,12 @@ def upsert_user_llm_config(
         row.wecom_webhook_encrypted = None
     elif wecom_webhook_url:
         row.wecom_webhook_encrypted = encrypt_secret(wecom_webhook_url)
+
+    # 处理钉钉 Webhook（加密存储或清除）
+    if clear_dingtalk_webhook:
+        row.dingtalk_webhook_encrypted = None
+    elif dingtalk_webhook_url:
+        row.dingtalk_webhook_encrypted = encrypt_secret(dingtalk_webhook_url)
 
     # 更新默认分析师列表
     if default_analysts is not None:

@@ -568,6 +568,9 @@ export interface RuntimeConfig {
     server_fallback_enabled?: boolean
     email_report_enabled?: boolean
     wecom_report_enabled?: boolean
+    dingtalk_report_enabled?: boolean  // 新增：钉钉报告开关
+    has_dingtalk_webhook?: boolean  // 新增：是否有钉钉 Webhook
+    dingtalk_webhook_display?: string | null  // 新增：钉钉 Webhook 脱敏显示
     default_analysts?: string[]
 }
 
@@ -590,11 +593,14 @@ export interface RuntimeConfigUpdate {
     api_key?: string
     api_key_pool?: string  // 新增：API Key 池
     wecom_webhook_url?: string
+    dingtalk_webhook_url?: string  // 新增：钉钉 Webhook URL
     clear_api_key?: boolean
     clear_api_key_pool?: boolean  // 新增：是否清除 API Key 池
     clear_wecom_webhook?: boolean
+    clear_dingtalk_webhook?: boolean  // 新增：是否清除钉钉 Webhook
     email_report_enabled?: boolean
     wecom_report_enabled?: boolean
+    dingtalk_report_enabled?: boolean  // 新增：钉钉报告开关
     default_analysts?: string[]
     warmup?: boolean
     force_warmup?: boolean
@@ -630,6 +636,17 @@ export interface WecomWarmupRequest {
 }
 
 export interface WecomWarmupResponse {
+    sent: boolean
+    message: string
+    webhook_display?: string | null
+}
+
+export interface DingtalkWarmupRequest {
+    dingtalk_webhook_url?: string
+    content?: string
+}
+
+export interface DingtalkWarmupResponse {
     sent: boolean
     message: string
     webhook_display?: string | null

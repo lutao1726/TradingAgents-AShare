@@ -168,9 +168,9 @@ async def _concurrency_slot(job_id: str, symbol: str):
 async def _send_scheduled_report_notifications(
     user_id: str, report_id: str, symbol: str
 ) -> None:
-    """发送定时分析报告的通知（邮件 + 企业微信）。
+    """发送定时分析报告的通知（邮件 + 企业微信 + 钉钉）。
 
-    分析完成后，根据用户的配置，通过邮件和/或企业微信 Webhook
+    分析完成后，根据用户的配置，通过邮件、企业微信 Webhook 和/或钉钉 Webhook
     发送报告通知。
 
     Args:
@@ -182,6 +182,7 @@ async def _send_scheduled_report_notifications(
         # 延迟导入，避免循环依赖
         from api.services.email_report_service import send_report_email_with_retry
         from api.services.wecom_notification_service import send_report_message_with_retry
+        from api.services.dingtalk_notification_service import send_report_message_with_retry as send_dingtalk_report_message_with_retry
 
         def _load_notification_targets():
             """从数据库加载通知目标配置（在同步线程中执行）"""
@@ -189,6 +190,8 @@ async def _send_scheduled_report_notifications(
             report_to_send = None      # 要发送的报告
             webhook_url = None         # 企业微信 Webhook URL
             wecom_report_enabled = True  # 企业微信通知是否启用
+            dingtalk_webhook_url = None  # 钉钉 Webhook URL
+            dingtalk_report_enabled = True  # 钉钉通知是否启用
 
             with get_db_ctx() as db:
                 # 查询用户信息
@@ -201,20 +204,25 @@ async def _send_scheduled_report_notifications(
                 webhook_url = auth_service.decrypt_secret(
                     getattr(user_cfg, "wecom_webhook_encrypted", None)
                 )
+                # 解密钉钉 Webhook URL
+                dingtalk_webhook_url = auth_service.decrypt_secret(
+                    getattr(user_cfg, "dingtalk_webhook_encrypted", None)
+                )
                 # 将 ORM 对象从会话中分离，以便在会话关闭后仍可使用
                 if report:
                     db.expunge(report)
                     report_to_send = report
                 if user:
                     wecom_report_enabled = getattr(user, "wecom_report_enabled", True)
+                    dingtalk_report_enabled = getattr(user, "dingtalk_report_enabled", True)
                     # 检查用户是否启用了邮件报告
                     if getattr(user, "email_report_enabled", True):
                         db.expunge(user)
                         email_user = user
-            return email_user, report_to_send, webhook_url, wecom_report_enabled
+            return email_user, report_to_send, webhook_url, wecom_report_enabled, dingtalk_webhook_url, dingtalk_report_enabled
 
         # 在线程池中加载通知配置（避免阻塞事件循环）
-        email_user, report_to_send, webhook_url, wecom_report_enabled = (
+        email_user, report_to_send, webhook_url, wecom_report_enabled, dingtalk_webhook_url, dingtalk_report_enabled = (
             await asyncio.to_thread(_load_notification_targets)
         )
 
@@ -232,6 +240,14 @@ async def _send_scheduled_report_notifications(
             _create_tracked_task(
                 send_report_message_with_retry(report_to_send, webhook_url),
                 label=f"WeCom notification task ({symbol})",
+            )
+
+        # 发送钉钉通知（异步后台任务）
+        if report_to_send and dingtalk_webhook_url and dingtalk_report_enabled:
+            _log(f"[Scheduler] Sending DingTalk report for {symbol}")
+            _create_tracked_task(
+                send_dingtalk_report_message_with_retry(report_to_send, dingtalk_webhook_url),
+                label=f"DingTalk notification task ({symbol})",
             )
     except Exception as e:
         logger.warning(f"[Scheduler] Notification send failed for {symbol}: {e}")

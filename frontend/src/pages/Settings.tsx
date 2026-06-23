@@ -49,6 +49,10 @@ export default function Settings() {
     const [wecomWebhook, setWecomWebhook] = useState('')
     const [hasStoredWebhook, setHasStoredWebhook] = useState(false)
     const [storedWebhookDisplay, setStoredWebhookDisplay] = useState('')
+    const [dingtalkWebhook, setDingtalkWebhook] = useState('')
+    const [hasStoredDingtalkWebhook, setHasStoredDingtalkWebhook] = useState(false)
+    const [storedDingtalkWebhookDisplay, setStoredDingtalkWebhookDisplay] = useState('')
+    const [dingtalkReportEnabled, setDingtalkReportEnabled] = useState(true)
 
     const [providerPreset, setProviderPreset] = useState('openai')
     const [customBaseUrl, setCustomBaseUrl] = useState('')
@@ -71,6 +75,9 @@ export default function Settings() {
     const [wecomWarmingUp, setWecomWarmingUp] = useState(false)
     const [wecomWarmupMessage, setWecomWarmupMessage] = useState<string | null>(null)
     const [wecomWarmupError, setWecomWarmupError] = useState<string | null>(null)
+    const [dingtalkWarmingUp, setDingtalkWarmingUp] = useState(false)
+    const [dingtalkWarmupMessage, setDingtalkWarmupMessage] = useState<string | null>(null)
+    const [dingtalkWarmupError, setDingtalkWarmupError] = useState<string | null>(null)
 
     // API Token states
     const [tokens, setTokens] = useState<UserToken[]>([])
@@ -132,6 +139,9 @@ export default function Settings() {
                 setServerFallbackEnabled(!!cfg.server_fallback_enabled)
                 setEmailReportEnabled(cfg.email_report_enabled !== false)
                 setWecomReportEnabled(cfg.wecom_report_enabled !== false)
+                setHasStoredDingtalkWebhook(!!cfg.has_dingtalk_webhook)
+                setStoredDingtalkWebhookDisplay(cfg.dingtalk_webhook_display || '')
+                setDingtalkReportEnabled(cfg.dingtalk_report_enabled !== false)
                 if (Array.isArray(cfg.default_analysts) && cfg.default_analysts.length > 0) {
                     setDefaultAnalysts(cfg.default_analysts)
                 }
@@ -197,7 +207,7 @@ export default function Settings() {
         localStorage.setItem('ta-custom-prompt', customPrompt)
     }
 
-    const buildRuntimeConfigPayload = (options?: { includeEmail?: boolean; includeWecom?: boolean }) => ({
+    const buildRuntimeConfigPayload = (options?: { includeEmail?: boolean; includeWecom?: boolean; includeDingtalk?: boolean }) => ({
         llm_provider: effectiveProvider,
         backend_url: effectiveBaseUrl || undefined,
         deep_think_llm: deepThinkLlm,
@@ -210,6 +220,10 @@ export default function Settings() {
             wecom_webhook_url: wecomWebhook.trim() || undefined,
             wecom_report_enabled: wecomReportEnabled,
         } : {}),
+        ...(options?.includeDingtalk ? {
+            dingtalk_webhook_url: dingtalkWebhook.trim() || undefined,
+            dingtalk_report_enabled: dingtalkReportEnabled,
+        } : {}),
         ...(options?.includeEmail ? { email_report_enabled: emailReportEnabled } : {}),
         default_analysts: defaultAnalysts,
     })
@@ -220,11 +234,11 @@ export default function Settings() {
         setTimeout(() => setSaved(false), 2000)
     }
 
-    const submitConfig = async (options?: { forceWarmup?: boolean; successMessage?: string; includeEmail?: boolean; includeWecom?: boolean }) => {
+    const submitConfig = async (options?: { forceWarmup?: boolean; successMessage?: string; includeEmail?: boolean; includeWecom?: boolean; includeDingtalk?: boolean }) => {
         persistLocalSettings()
-        const { forceWarmup = false, successMessage = '设置已保存', includeEmail = true, includeWecom = false } = options || {}
+        const { forceWarmup = false, successMessage = '设置已保存', includeEmail = true, includeWecom = false, includeDingtalk = false } = options || {}
         const response = await api.updateConfig({
-            ...buildRuntimeConfigPayload({ includeEmail, includeWecom }),
+            ...buildRuntimeConfigPayload({ includeEmail, includeWecom, includeDingtalk }),
             warmup: true,
             force_warmup: forceWarmup,
         })
@@ -233,8 +247,12 @@ export default function Settings() {
         setHasStoredWebhook(!!response.current.has_wecom_webhook)
         setStoredWebhookDisplay(response.current.wecom_webhook_display || '')
         setWecomReportEnabled(response.current.wecom_report_enabled !== false)
+        setHasStoredDingtalkWebhook(!!response.current.has_dingtalk_webhook)
+        setStoredDingtalkWebhookDisplay(response.current.dingtalk_webhook_display || '')
+        setDingtalkReportEnabled(response.current.dingtalk_report_enabled !== false)
         setLlmApiKey('')
         setWecomWebhook('')
+        setDingtalkWebhook('')
         showSavedMessage(response.warmup?.message || successMessage)
         return response
     }
@@ -242,7 +260,7 @@ export default function Settings() {
     const handleSaveAll = async () => {
         setSaveAllSaving(true)
         try {
-            await submitConfig({ includeEmail: true, includeWecom: true, successMessage: '全部设置已保存' })
+            await submitConfig({ includeEmail: true, includeWecom: true, includeDingtalk: true, successMessage: '全部设置已保存' })
             showSavedMessage('全部设置已保存')
         } catch (err) {
             alert(err instanceof Error ? err.message : '保存全部设置失败')
@@ -334,6 +352,44 @@ export default function Settings() {
             setWecomWarmupError(err instanceof Error ? err.message : 'Webhook 测试发送失败')
         } finally {
             setWecomWarmingUp(false)
+        }
+    }
+
+    const handleClearDingtalkWebhook = async () => {
+        if (!hasStoredDingtalkWebhook) return
+        setSaving(true)
+        try {
+            const response = await api.updateConfig({ clear_dingtalk_webhook: true })
+            setHasStoredDingtalkWebhook(!!response.current.has_dingtalk_webhook)
+            setStoredDingtalkWebhookDisplay(response.current.dingtalk_webhook_display || '')
+            setDingtalkWebhook('')
+            setDingtalkWarmupMessage(null)
+            setDingtalkWarmupError(null)
+            showSavedMessage('钉钉机器人已清除')
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '清除钉钉机器人失败')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const handleDingtalkWarmup = async () => {
+        setDingtalkWarmingUp(true)
+        setDingtalkWarmupMessage(null)
+        setDingtalkWarmupError(null)
+        try {
+            const response = await api.warmupDingtalk({
+                dingtalk_webhook_url: dingtalkWebhook.trim() || undefined,
+            })
+            setDingtalkWarmupMessage(
+                response.webhook_display
+                    ? `${response.message}，目标：${response.webhook_display}`
+                    : response.message
+            )
+        } catch (err) {
+            setDingtalkWarmupError(err instanceof Error ? err.message : 'Webhook 测试发送失败')
+        } finally {
+            setDingtalkWarmingUp(false)
         }
     }
 
@@ -820,6 +876,74 @@ export default function Settings() {
                     {wecomWarmupError && (
                         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
                             {wecomWarmupError}
+                        </div>
+                    )}
+                </div>
+
+                {/* 钉钉 Webhook */}
+                <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 space-y-3 dark:border-slate-700/80 dark:bg-slate-900/40">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-sm font-medium text-slate-700 dark:text-slate-200">钉钉自定义机器人</div>
+                            <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                                定时分析完成时向钉钉群推送摘要
+                                {storedDingtalkWebhookDisplay && <span className="ml-2 font-mono">({storedDingtalkWebhookDisplay})</span>}
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setDingtalkReportEnabled(!dingtalkReportEnabled)}
+                            disabled={configLoading}
+                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                                dingtalkReportEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-600'
+                            }`}
+                        >
+                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${dingtalkReportEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                        </button>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                            <Webhook className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                                type="text"
+                                value={dingtalkWebhook}
+                                onChange={e => setDingtalkWebhook(e.target.value)}
+                                className="input w-full pl-10"
+                                placeholder={hasStoredDingtalkWebhook ? '已保存，留空则保持不变' : 'Webhook 地址（支持 access_token 或完整 URL）'}
+                                disabled={configLoading}
+                            />
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleDingtalkWarmup}
+                            disabled={configLoading || saving || saveAllSaving || dingtalkWarmingUp || (!dingtalkWebhook.trim() && !hasStoredDingtalkWebhook)}
+                            className="btn-secondary inline-flex items-center gap-1.5 text-xs shrink-0"
+                        >
+                            {dingtalkWarmingUp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Flame className="w-3.5 h-3.5" />}
+                            {dingtalkWarmingUp ? '发送中...' : '测试连接'}
+                        </button>
+                        {hasStoredDingtalkWebhook && (
+                            <button
+                                type="button"
+                                onClick={handleClearDingtalkWebhook}
+                                disabled={saving || saveAllSaving}
+                                className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-rose-500 disabled:opacity-50 shrink-0"
+                            >
+                                <Trash2 className="w-3 h-3" />
+                                清除
+                            </button>
+                        )}
+                    </div>
+
+                    {dingtalkWarmupMessage && (
+                        <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300">
+                            {dingtalkWarmupMessage}
+                        </div>
+                    )}
+                    {dingtalkWarmupError && (
+                        <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+                            {dingtalkWarmupError}
                         </div>
                     )}
                 </div>
