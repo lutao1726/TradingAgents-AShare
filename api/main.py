@@ -69,7 +69,7 @@ from sqlalchemy.orm import Session  # 数据库会话
 import pandas as pd
 
 # ── 项目内部依赖 ─────────────────────────────────────────────────────
-from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, init_db, get_db, get_db_ctx
+from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, PredictionSnapshotDB, init_db, get_db, get_db_ctx
 from api.job_store import get_job_store as _new_job_store  # 任务存储工厂
 from api.services import auth_service, portfolio_import_service, report_service, token_service, watchlist_service, scheduled_service, tracking_board_service, feedback_service, sponsor_service
 
@@ -840,6 +840,54 @@ class ReportBatchDeleteRequest(BaseModel):
 class ReportBatchDeleteResponse(BaseModel):
     deleted_ids: List[str]
     missing_ids: List[str]
+
+
+class PredictionSnapshotResponse(BaseModel):
+    id: str
+    user_id: Optional[str]
+    report_id: str
+    symbol: str
+    trade_date: str
+    direction: str
+    confidence: Optional[int]
+    target_price: Optional[float]
+    stop_loss_price: Optional[float]
+    analyst_traces: Optional[List[Dict[str, Any]]]
+    risk_verdict: Optional[str]
+    actual_close_t1: Optional[float]
+    actual_close_t5: Optional[float]
+    actual_close_t20: Optional[float]
+    return_t1: Optional[float]
+    return_t5: Optional[float]
+    return_t20: Optional[float]
+    direction_correct: Optional[bool]
+    attribution: Optional[Dict[str, Any]]
+    created_at: Optional[str]
+    backfilled_at: Optional[str]
+
+
+class PredictionListResponse(BaseModel):
+    total: int
+    predictions: List[PredictionSnapshotResponse]
+
+
+class PredictionAccuracyResponse(BaseModel):
+    total: int
+    correct: int
+    accuracy: float
+    t1_avg_return: Optional[float]
+    t5_avg_return: Optional[float]
+    t20_avg_return: Optional[float]
+    confidence_calibration: Optional[Dict[str, Dict[str, Any]]]
+
+
+class PredictionBackfillResponse(BaseModel):
+    status: str
+    stats: Dict[str, int]
+
+
+class PredictionBackfillRequest(BaseModel):
+    limit: int = Field(100, ge=1, le=1000, description="最多回填条数")
 
 
 class LatestReportsBySymbolsRequest(BaseModel):
@@ -2086,10 +2134,23 @@ async def _run_job_inner(
                         )
                         save_db.commit()
 
+                def _save_prediction_snapshot_sync():
+                    with get_db_ctx() as _pdb:
+                        from api.services.prediction_service import save_prediction_snapshot
+                        save_prediction_snapshot(
+                            db=_pdb,
+                            job_id=job_id,
+                            user_id=user_id,
+                            symbol=request.symbol,
+                            trade_date=request.trade_date,
+                            result=result,
+                        )
+
                 try:
                     await asyncio.to_thread(_save_report_sync)
+                    await asyncio.to_thread(_save_prediction_snapshot_sync)
                 except Exception as e:
-                    _log(f"Failed to save report: {e}")
+                    _log(f"Failed to save report or prediction snapshot: {e}")
 
             # 所有后处理完成后再标记 completed，防止 SSE 超时提前关闭流
             _set_job(job_id, status="completed", result=result,
@@ -3443,6 +3504,85 @@ def batch_delete_reports_endpoint(
         return report_service.batch_delete_reports(db, body.report_ids, user_id=current_user.id)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+# ─── Prediction Tracking Endpoints ─────────────────────────────────────────
+
+@app.get("/v1/predictions", response_model=PredictionListResponse)
+def list_predictions(
+    symbol: Optional[str] = Query(None, description="股票代码筛选"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """获取当前用户的预测历史记录。"""
+    from api.services.prediction_service import get_prediction_history
+
+    predictions = get_prediction_history(
+        user_id=current_user.id,
+        symbol=symbol,
+        limit=limit,
+        offset=offset,
+    )
+    total = db.query(PredictionSnapshotDB).filter(
+        PredictionSnapshotDB.user_id == current_user.id,
+    ).count()
+    if symbol:
+        total = db.query(PredictionSnapshotDB).filter(
+            PredictionSnapshotDB.user_id == current_user.id,
+            PredictionSnapshotDB.symbol == symbol,
+        ).count()
+
+    return PredictionListResponse(total=total, predictions=predictions)
+
+
+@app.get("/v1/predictions/accuracy", response_model=PredictionAccuracyResponse)
+def get_prediction_accuracy(
+    symbol: Optional[str] = Query(None, description="股票代码筛选"),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """获取预测准确率统计。"""
+    from api.services.prediction_service import compute_accuracy
+
+    stats = compute_accuracy(user_id=current_user.id, symbol=symbol)
+    return PredictionAccuracyResponse(**stats)
+
+
+@app.post("/v1/predictions/backfill", response_model=PredictionBackfillResponse)
+def trigger_backfill(
+    request: Optional[PredictionBackfillRequest] = None,
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """手动触发预测回填（异步后台任务）。"""
+    from api.services.prediction_service import backfill_pending
+
+    limit = request.limit if request and request.limit else 100
+
+    def _run_backfill():
+        return backfill_pending(limit=limit)
+
+    background_tasks.add_task(_run_backfill)
+    return PredictionBackfillResponse(status="scheduled", stats={"limit": limit})
+
+
+@app.get("/v1/predictions/{prediction_id}", response_model=PredictionSnapshotResponse)
+def get_prediction_detail(
+    prediction_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """获取单条预测快照详情。"""
+    snapshot = db.query(PredictionSnapshotDB).filter(
+        PredictionSnapshotDB.id == prediction_id,
+        PredictionSnapshotDB.user_id == current_user.id,
+    ).first()
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="预测快照不存在")
+    return PredictionSnapshotResponse(**snapshot.to_dict())
 
 
 # ─── API Token Endpoints ────────────────────────────────────────────────────

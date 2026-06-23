@@ -709,3 +709,52 @@ export interface DebateMessage {
     isVerdict?: boolean
     horizon?: string
 }
+
+// Prediction Tracking Types
+export interface PredictionSnapshotResponse {
+    id: string
+    user_id?: string
+    report_id: string
+    symbol: string
+    trade_date: string
+    direction: string
+    confidence?: number
+    target_price?: number
+    stop_loss_price?: number
+    analyst_traces?: Record<string, any>[]
+    risk_verdict?: string
+    actual_close_t1?: number
+    actual_close_t5?: number
+    actual_close_t20?: number
+    return_t1?: number
+    return_t5?: number
+    return_t20?: number
+    direction_correct?: boolean
+    attribution?: Record<string, any>
+    created_at?: string
+    backfilled_at?: string
+}
+
+export interface PredictionListResponse {
+    total: number
+    predictions: PredictionSnapshotResponse[]
+}
+
+export interface PredictionAccuracyResponse {
+    total: number
+    correct: number
+    accuracy: number
+    t1_avg_return?: number
+    t5_avg_return?: number
+    t20_avg_return?: number
+    confidence_calibration?: Record<string, Record<string, any>>
+}
+
+export interface PredictionBackfillRequest {
+    limit?: number
+}
+
+export interface PredictionBackfillResponse {
+    status: string
+    stats: Record<string, number>
+}

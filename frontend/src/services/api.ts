@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, DingtalkWarmupRequest, DingtalkWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, DingtalkWarmupRequest, DingtalkWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PredictionListResponse, PredictionAccuracyResponse, PredictionBackfillRequest, PredictionBackfillResponse } from '@/types'
 
 export function getBaseUrl(): string {
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
@@ -307,6 +307,24 @@ class ApiService {
         return this.request<DingtalkWarmupResponse>('/v1/config/dingtalk/warmup', {
             method: 'POST',
             body: JSON.stringify(request),
+        })
+    }
+
+    // Prediction Tracking
+    async getPredictions(params?: { symbol?: string; limit?: number; offset?: number }): Promise<PredictionListResponse> {
+        const query = params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ''
+        return this.request<PredictionListResponse>(`/v1/predictions${query}`)
+    }
+
+    async getPredictionAccuracy(params?: { symbol?: string }): Promise<PredictionAccuracyResponse> {
+        const query = params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ''
+        return this.request<PredictionAccuracyResponse>(`/v1/predictions/accuracy${query}`)
+    }
+
+    async triggerBackfill(request?: PredictionBackfillRequest): Promise<PredictionBackfillResponse> {
+        return this.request<PredictionBackfillResponse>('/v1/predictions/backfill', {
+            method: 'POST',
+            body: JSON.stringify(request || {}),
         })
     }
 

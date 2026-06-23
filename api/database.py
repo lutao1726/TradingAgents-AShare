@@ -469,6 +469,96 @@ class ReportDB(Base):
         }
 
 
+class PredictionSnapshotDB(Base):
+    """预测快照数据库模型。
+    
+    存储每次分析完成的预测快照，用于后续回填实际结果和计算准确率。
+    
+    字段说明：
+    - id: 快照唯一标识（与 report_id 一致，方便关联）
+    - user_id: 用户 ID
+    - report_id: 关联的研报 ID
+    - symbol: 股票代码
+    - trade_date: 预测日期
+    - direction: 预测方向（BUY/SELL/HOLD）
+    - confidence: 预测置信度（0-100）
+    - target_price: 目标价
+    - stop_loss_price: 止损价
+    - analyst_traces: 各分析师 verdict（JSON）
+    - risk_verdict: 风控裁决（pass/revise/reject）
+    - actual_close_t1/t5/t20: T+1/T+5/T+20 实际收盘价
+    - return_t1/t5/t20: T+1/T+5/T+20 收益率（%）
+    - direction_correct: 方向是否正确
+    - attribution: 归因分析（JSON）
+    - backfilled_at: 回填时间
+    """
+
+    __tablename__ = "prediction_snapshots"
+
+    id = Column(String(36), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=True)
+    report_id = Column(String(36), index=True, nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    trade_date = Column(String(10), nullable=False, index=True)
+
+    # 预测内容
+    direction = Column(String(20), nullable=False)
+    confidence = Column(Integer, nullable=True)
+    target_price = Column(Float, nullable=True)
+    stop_loss_price = Column(Float, nullable=True)
+
+    # 各分析师 verdict（JSON）
+    analyst_traces = Column(JSON, nullable=True)
+
+    # 风控裁决
+    risk_verdict = Column(String(20), nullable=True)
+
+    # 实际结果（延迟回填）
+    actual_close_t1 = Column(Float, nullable=True)
+    actual_close_t5 = Column(Float, nullable=True)
+    actual_close_t20 = Column(Float, nullable=True)
+
+    # 收益（延迟计算）
+    return_t1 = Column(Float, nullable=True)
+    return_t5 = Column(Float, nullable=True)
+    return_t20 = Column(Float, nullable=True)
+
+    # 准确率
+    direction_correct = Column(Boolean, nullable=True)
+
+    # 归因（延迟填写）
+    attribution = Column(JSON, nullable=True)
+
+    # 元数据
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    backfilled_at = Column(DateTime, nullable=True)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "report_id": self.report_id,
+            "symbol": self.symbol,
+            "trade_date": self.trade_date,
+            "direction": self.direction,
+            "confidence": self.confidence,
+            "target_price": self.target_price,
+            "stop_loss_price": self.stop_loss_price,
+            "analyst_traces": self.analyst_traces,
+            "risk_verdict": self.risk_verdict,
+            "actual_close_t1": self.actual_close_t1,
+            "actual_close_t5": self.actual_close_t5,
+            "actual_close_t20": self.actual_close_t20,
+            "return_t1": self.return_t1,
+            "return_t5": self.return_t5,
+            "return_t20": self.return_t20,
+            "direction_correct": self.direction_correct,
+            "attribution": self.attribution,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "backfilled_at": self.backfilled_at.isoformat() if self.backfilled_at else None,
+        }
+
+
 class UserDB(Base):
     """用户数据库模型。
     

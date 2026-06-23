@@ -616,7 +616,35 @@ async def _startup():
     await asyncio.to_thread(_load_cn_stock_map)
     _log("Stock map pre-loaded on startup.")
 
-    # ── 步骤 7：进入调度器主循环 ────────────────────────────────────────────
+    # ── 步骤 7：启动预测回填后台任务 ────────────────────────────────────────
+    # 每天执行一次预测回填（T+1/T+5/T+20），更新预测准确率
+    async def _prediction_backfill_loop():
+        """预测回填循环：每天执行一次。"""
+        from tradingagents.dataflows.trade_calendar import is_cn_trading_day
+        from zoneinfo import ZoneInfo
+
+        _log("[PredictionBackfill] Loop started.")
+        while True:
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            # 每天 8:05 执行一次
+            if now.hour == 8 and now.minute == 5:
+                if is_cn_trading_day(now.strftime("%Y-%m-%d")):
+                    _log("[PredictionBackfill] Running daily backfill...")
+                    try:
+                        from api.services.prediction_service import backfill_pending
+                        stats = await asyncio.to_thread(backfill_pending, limit=200)
+                        _log(f"[PredictionBackfill] Completed: {stats}")
+                    except Exception as exc:
+                        logger.error(f"[PredictionBackfill] Failed: {exc}")
+                # 避免同一分钟内重复执行
+                await asyncio.sleep(60)
+            else:
+                # 每 30 秒检查一次时间
+                await asyncio.sleep(30)
+
+    _create_tracked_task(_prediction_backfill_loop(), label="Prediction backfill loop")
+
+    # ── 步骤 8：进入调度器主循环 ────────────────────────────────────────────
     # 此函数不会返回，直到进程被中断
     await _scheduler_loop()
 
