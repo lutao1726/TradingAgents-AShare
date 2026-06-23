@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, DingtalkWarmupRequest, DingtalkWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PredictionListResponse, PredictionAccuracyResponse, PredictionBackfillRequest, PredictionBackfillResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, DingtalkWarmupRequest, DingtalkWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PredictionListResponse, PredictionAccuracyResponse, PredictionBackfillRequest, PredictionBackfillResponse, AlertCreateRequest, AlertUpdateRequest, AlertResponse, AlertListResponse } from '@/types'
 
 export function getBaseUrl(): string {
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
@@ -325,6 +325,32 @@ class ApiService {
         return this.request<PredictionBackfillResponse>('/v1/predictions/backfill', {
             method: 'POST',
             body: JSON.stringify(request || {}),
+        })
+    }
+
+    // Alerts
+    async getAlerts(params?: { symbol?: string }): Promise<AlertListResponse> {
+        const query = params ? `?${new URLSearchParams(params as Record<string, string>).toString()}` : ''
+        return this.request<AlertListResponse>(`/v1/alerts${query}`)
+    }
+
+    async createAlert(request: AlertCreateRequest): Promise<AlertResponse> {
+        return this.request<AlertResponse>('/v1/alerts', {
+            method: 'POST',
+            body: JSON.stringify(request),
+        })
+    }
+
+    async updateAlert(alertId: string, request: AlertUpdateRequest): Promise<AlertResponse> {
+        return this.request<AlertResponse>(`/v1/alerts/${alertId}`, {
+            method: 'PATCH',
+            body: JSON.stringify(request),
+        })
+    }
+
+    async deleteAlert(alertId: string): Promise<{ message: string }> {
+        return this.request<{ message: string }>(`/v1/alerts/${alertId}`, {
+            method: 'DELETE',
         })
     }
 

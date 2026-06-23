@@ -716,6 +716,7 @@ export interface PredictionSnapshotResponse {
     user_id?: string
     report_id: string
     symbol: string
+    stock_name?: string
     trade_date: string
     direction: string
     confidence?: number
@@ -757,4 +758,59 @@ export interface PredictionBackfillRequest {
 export interface PredictionBackfillResponse {
     status: string
     stats: Record<string, number>
+}
+
+// Alert Types
+export interface AlertTrigger {
+    id: string
+    alert_id: string
+    trigger_type: string
+    threshold: number
+    enabled: boolean
+    created_at?: string
+}
+
+export interface Alert {
+    id: string
+    user_id: string
+    symbol: string
+    name?: string
+    is_active: boolean
+    created_at?: string
+    updated_at?: string
+    triggers: AlertTrigger[]
+}
+
+export interface AlertCreateRequest {
+    symbol: string
+    name?: string
+    triggers: AlertTriggerRequest[]
+}
+
+export interface AlertTriggerRequest {
+    trigger_type: string
+    threshold: number
+    enabled?: boolean
+}
+
+export interface AlertUpdateRequest {
+    name?: string
+    is_active?: boolean
+    triggers?: AlertTriggerRequest[]
+}
+
+export interface AlertResponse {
+    id: string
+    user_id: string
+    symbol: string
+    name?: string
+    is_active: boolean
+    created_at?: string
+    updated_at?: string
+    triggers: AlertTrigger[]
+}
+
+export interface AlertListResponse {
+    total: number
+    alerts: AlertResponse[]
 }

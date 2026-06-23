@@ -69,7 +69,7 @@ from sqlalchemy.orm import Session  # 数据库会话
 import pandas as pd
 
 # ── 项目内部依赖 ─────────────────────────────────────────────────────
-from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, PredictionSnapshotDB, init_db, get_db, get_db_ctx
+from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, PredictionSnapshotDB, AlertDB, AlertTriggerDB, init_db, get_db, get_db_ctx
 from api.job_store import get_job_store as _new_job_store  # 任务存储工厂
 from api.services import auth_service, portfolio_import_service, report_service, token_service, watchlist_service, scheduled_service, tracking_board_service, feedback_service, sponsor_service
 
@@ -298,7 +298,13 @@ async def _send_manual_trigger_notifications(
         )
         if email_user and report_to_send:
             _log(f"[Manual Trigger] Sending email report for {symbol} to {email_user.email}")
-            await send_report_email_with_retry(email_user, report_to_send)
+            std_symbol = symbol.strip().upper()
+            code_to_name = _get_reverse_stock_map_cached_only()
+            stock_name = code_to_name.get(std_symbol) or next(
+                (name for code, name in code_to_name.items() if code.split(".")[0] == std_symbol.split(".")[0]),
+                "",
+            )
+            await send_report_email_with_retry(email_user, report_to_send, stock_name=stock_name)
         if report_to_send and webhook_url and wecom_report_enabled:
             _log(f"[Manual Trigger] Sending WeCom report for {symbol}")
             await send_report_message_with_retry(report_to_send, webhook_url)
@@ -857,6 +863,7 @@ class PredictionSnapshotResponse(BaseModel):
     user_id: Optional[str]
     report_id: str
     symbol: str
+    stock_name: Optional[str] = None
     trade_date: str
     direction: str
     confidence: Optional[int]
@@ -3544,6 +3551,15 @@ def list_predictions(
             PredictionSnapshotDB.symbol == symbol,
         ).count()
 
+    # 附加股票名称
+    code_to_name = _get_reverse_stock_map_cached_only()
+    for p in predictions:
+        std_symbol = p.get("symbol", "").strip().upper()
+        p["stock_name"] = code_to_name.get(std_symbol) or next(
+            (name for code, name in code_to_name.items() if code.split(".")[0] == std_symbol.split(".")[0]),
+            ""
+        )
+
     return PredictionListResponse(total=total, predictions=predictions)
 
 
@@ -3592,7 +3608,196 @@ def get_prediction_detail(
     ).first()
     if not snapshot:
         raise HTTPException(status_code=404, detail="预测快照不存在")
-    return PredictionSnapshotResponse(**snapshot.to_dict())
+    result = snapshot.to_dict()
+    std_symbol = result.get("symbol", "").strip().upper()
+    code_to_name = _get_reverse_stock_map_cached_only()
+    result["stock_name"] = code_to_name.get(std_symbol) or next(
+        (name for code, name in code_to_name.items() if code.split(".")[0] == std_symbol.split(".")[0]),
+        ""
+    )
+    return PredictionSnapshotResponse(**result)
+
+
+# ─── Alert Endpoints ───────────────────────────────────────────────────────
+
+class AlertTriggerRequest(BaseModel):
+    trigger_type: str = Field(..., description="触发类型: price_above / price_below / daily_change_pct / unrealized_pnl_pct")
+    threshold: float = Field(..., description="阈值")
+    enabled: bool = True
+
+
+class AlertCreateRequest(BaseModel):
+    symbol: str = Field(..., description="股票代码")
+    name: Optional[str] = Field(None, description="预警名称")
+    triggers: List[AlertTriggerRequest] = Field(..., description="触发条件列表")
+
+
+class AlertUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+    triggers: Optional[List[AlertTriggerRequest]] = None
+
+
+class AlertResponse(BaseModel):
+    id: str
+    user_id: str
+    symbol: str
+    name: Optional[str]
+    is_active: bool
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    triggers: List[dict] = []
+
+
+class AlertListResponse(BaseModel):
+    total: int
+    alerts: List[AlertResponse]
+
+
+@app.post("/v1/alerts", response_model=AlertResponse)
+def create_alert(
+    request: AlertCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """创建预警。"""
+    from api.services.alert_service import AlertServiceError
+
+    alert_id = uuid4().hex
+    alert = AlertDB(
+        id=alert_id,
+        user_id=current_user.id,
+        symbol=request.symbol,
+        name=request.name,
+        is_active=True,
+    )
+    db.add(alert)
+    db.commit()
+    db.refresh(alert)
+
+    # 创建触发条件
+    for trigger in request.triggers:
+        trigger_db = AlertTriggerDB(
+            id=uuid4().hex,
+            alert_id=alert_id,
+            trigger_type=trigger.trigger_type,
+            threshold=trigger.threshold,
+            enabled=trigger.enabled,
+        )
+        db.add(trigger_db)
+    db.commit()
+
+    return AlertResponse(
+        id=alert.id,
+        user_id=alert.user_id,
+        symbol=alert.symbol,
+        name=alert.name,
+        is_active=alert.is_active,
+        created_at=alert.created_at.isoformat() if alert.created_at else None,
+        updated_at=alert.updated_at.isoformat() if alert.updated_at else None,
+        triggers=[t.to_dict() for t in db.query(AlertTriggerDB).filter_by(alert_id=alert_id).all()],
+    )
+
+
+@app.get("/v1/alerts", response_model=AlertListResponse)
+def list_alerts(
+    symbol: Optional[str] = Query(None, description="股票代码筛选"),
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """获取当前用户的预警列表。"""
+    query = db.query(AlertDB).filter(AlertDB.user_id == current_user.id)
+    if symbol:
+        query = query.filter(AlertDB.symbol == symbol)
+    alerts = query.order_by(AlertDB.created_at.desc()).all()
+
+    result = []
+    for alert in alerts:
+        triggers = db.query(AlertTriggerDB).filter_by(alert_id=alert.id).all()
+        result.append(AlertResponse(
+            id=alert.id,
+            user_id=alert.user_id,
+            symbol=alert.symbol,
+            name=alert.name,
+            is_active=alert.is_active,
+            created_at=alert.created_at.isoformat() if alert.created_at else None,
+            updated_at=alert.updated_at.isoformat() if alert.updated_at else None,
+            triggers=[t.to_dict() for t in triggers],
+        ))
+
+    return AlertListResponse(total=len(result), alerts=result)
+
+
+@app.patch("/v1/alerts/{alert_id}", response_model=AlertResponse)
+def update_alert(
+    alert_id: str,
+    request: AlertUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """更新预警。"""
+    alert = db.query(AlertDB).filter(
+        AlertDB.id == alert_id,
+        AlertDB.user_id == current_user.id,
+    ).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="预警不存在")
+
+    if request.name is not None:
+        alert.name = request.name
+    if request.is_active is not None:
+        alert.is_active = request.is_active
+    db.commit()
+    db.refresh(alert)
+
+    # 更新触发条件（如果提供）
+    if request.triggers is not None:
+        # 删除旧条件
+        db.query(AlertTriggerDB).filter_by(alert_id=alert_id).delete()
+        # 创建新条件
+        for trigger in request.triggers:
+            trigger_db = AlertTriggerDB(
+                id=uuid4().hex,
+                alert_id=alert_id,
+                trigger_type=trigger.trigger_type,
+                threshold=trigger.threshold,
+                enabled=trigger.enabled,
+            )
+            db.add(trigger_db)
+        db.commit()
+
+    triggers = db.query(AlertTriggerDB).filter_by(alert_id=alert_id).all()
+    return AlertResponse(
+        id=alert.id,
+        user_id=alert.user_id,
+        symbol=alert.symbol,
+        name=alert.name,
+        is_active=alert.is_active,
+        created_at=alert.created_at.isoformat() if alert.created_at else None,
+        updated_at=alert.updated_at.isoformat() if alert.updated_at else None,
+        triggers=[t.to_dict() for t in triggers],
+    )
+
+
+@app.delete("/v1/alerts/{alert_id}")
+def delete_alert(
+    alert_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_web_user),
+):
+    """删除预警。"""
+    alert = db.query(AlertDB).filter(
+        AlertDB.id == alert_id,
+        AlertDB.user_id == current_user.id,
+    ).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="预警不存在")
+
+    # 删除关联的触发条件
+    db.query(AlertTriggerDB).filter_by(alert_id=alert_id).delete()
+    db.delete(alert)
+    db.commit()
+    return {"message": "删除成功"}
 
 
 # ─── API Token Endpoints ────────────────────────────────────────────────────

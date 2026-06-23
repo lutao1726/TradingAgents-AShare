@@ -212,7 +212,7 @@ export default function Predictions() {
                                     const DirIcon = direction.icon
                                     return (
                                         <tr key={pred.id} className="border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
-                                            <td className="py-3 px-4 font-mono">{pred.symbol}</td>
+                                            <td className="py-3 px-4 font-mono">{pred.symbol}{pred.stock_name ? `（${pred.stock_name}）` : ''}</td>
                                             <td className="py-3 px-4">{pred.trade_date}</td>
                                             <td className="py-3 px-4">
                                                 <div className={`flex items-center gap-1.5 ${direction.color}`}>

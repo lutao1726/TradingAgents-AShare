@@ -121,6 +121,7 @@ from api.main import (
     _get_job,                          # 获取任务状态
     _emit_job_event,                   # 发送任务事件（SSE）
     get_job_store,                     # 获取任务存储实例
+    _get_reverse_stock_map_cached_only,  # 股票代码→名称映射缓存
 )
 
 # 设置定时任务上下文标记（让数据采集层知道当前是定时任务触发的分析）
@@ -229,8 +230,14 @@ async def _send_scheduled_report_notifications(
         # 发送邮件通知（异步后台任务）
         if email_user and report_to_send:
             _log(f"[Scheduler] Sending email report for {symbol} to {email_user.email}")
+            std_symbol = symbol.strip().upper()
+            code_to_name = _get_reverse_stock_map_cached_only()
+            stock_name = code_to_name.get(std_symbol) or next(
+                (name for code, name in code_to_name.items() if code.split(".")[0] == std_symbol.split(".")[0]),
+                "",
+            )
             _create_tracked_task(
-                send_report_email_with_retry(email_user, report_to_send),
+                send_report_email_with_retry(email_user, report_to_send, stock_name=stock_name),
                 label=f"Email notification task ({symbol})",
             )
 
@@ -644,7 +651,49 @@ async def _startup():
 
     _create_tracked_task(_prediction_backfill_loop(), label="Prediction backfill loop")
 
-    # ── 步骤 8：进入调度器主循环 ────────────────────────────────────────────
+    # ── 步骤 8：启动预警检查后台任务 ────────────────────────────────────────
+    # 在交易时段内每 15 分钟检查一次持仓预警
+    async def _alert_check_loop():
+        """预警检查循环：交易时段内每 15 分钟执行一次。"""
+        from tradingagents.dataflows.trade_calendar import is_cn_trading_day
+        from zoneinfo import ZoneInfo
+
+        _log("[AlertCheck] Loop started.")
+        while True:
+            now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
+            today = now.strftime("%Y-%m-%d")
+            current_hhmm = now.strftime("%H:%M")
+
+            # 仅在交易时段（9:30-11:30, 13:00-15:00）检查
+            hour_minute = now.hour * 60 + now.minute
+            trading_windows = [(9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60)]
+            in_trading_hours = any(start <= hour_minute <= end for start, end in trading_windows)
+
+            if in_trading_hours and is_cn_trading_day(today):
+                _log("[AlertCheck] Running alert check...")
+                try:
+                    from api.services.alert_service import check_alerts_for_user
+                    # 获取所有有预警的用户
+                    with get_db_ctx() as db:
+                        from api.database import AlertDB
+                        user_ids = {row[0] for row in db.query(AlertDB.user_id).filter(AlertDB.is_active == True).distinct()}
+                    for uid in user_ids:
+                        try:
+                            await asyncio.to_thread(check_alerts_for_user, uid)
+                        except Exception as exc:
+                            logger.error(f"[AlertCheck] Failed for user {uid}: {exc}")
+                    _log(f"[AlertCheck] Completed for {len(user_ids)} users")
+                except Exception as exc:
+                    logger.error(f"[AlertCheck] Failed: {exc}")
+                # 避免重复执行，等 15 分钟
+                await asyncio.sleep(15 * 60)
+            else:
+                # 每 60 秒检查一次时间
+                await asyncio.sleep(60)
+
+    _create_tracked_task(_alert_check_loop(), label="Alert check loop")
+
+    # ── 步骤 9：进入调度器主循环 ────────────────────────────────────────────
     # 此函数不会返回，直到进程被中断
     await _scheduler_loop()
 

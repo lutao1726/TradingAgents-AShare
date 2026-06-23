@@ -66,9 +66,22 @@ def build_report_message(report: "ReportDB") -> str:
     """
     lines = [
         "TradingAgents 定时分析完成",
-        f"标的：{report.symbol}",
-        f"交易日：{report.trade_date}",
     ]
+    try:
+        from api.main import _get_reverse_stock_map_cached_only
+        code_to_name = _get_reverse_stock_map_cached_only()
+        std_symbol = report.symbol.strip().upper()
+        stock_name = code_to_name.get(std_symbol) or next(
+            (name for code, name in code_to_name.items() if code.split(".")[0] == std_symbol.split(".")[0]),
+            ""
+        )
+        if stock_name:
+            lines.append(f"标的：{report.symbol}（{stock_name}）")
+        else:
+            lines.append(f"标的：{report.symbol}")
+    except Exception:
+        lines.append(f"标的：{report.symbol}")
+    lines.append(f"交易日：{report.trade_date}")
     
     # 添加决策信息
     if getattr(report, "decision", None):

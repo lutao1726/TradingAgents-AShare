@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard'
 import Analysis from './pages/Analysis'
 import Reports from './pages/Reports'
 import Predictions from './pages/Predictions'
+import Alerts from './pages/Alerts'
 import Settings from './pages/Settings'
 import Portfolio from './pages/Portfolio'
 import TrackingBoard from './pages/TrackingBoard'
@@ -60,6 +61,7 @@ function App() {
                   <Route path="/analysis" element={<Analysis />} />
                   <Route path="/reports" element={<Reports />} />
                   <Route path="/predictions" element={<Predictions />} />
+                  <Route path="/alerts" element={<Alerts />} />
                   <Route path="/portfolio" element={<Portfolio />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/feedback" element={<Feedback />} />

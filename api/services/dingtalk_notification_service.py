@@ -33,6 +33,32 @@ _DINGTALK_HOST = "oapi.dingtalk.com"
 _DINGTALK_PATH = "/robot/send"
 
 
+def _lookup_stock_name(symbol: str) -> str:
+    """根据股票代码查找股票名称。
+
+    Args:
+        symbol: 股票代码（如 600519.SH）
+
+    Returns:
+        股票名称，查找失败返回空字符串
+    """
+    try:
+        from api.main import _get_reverse_stock_map_cached_only
+        code_to_name = _get_reverse_stock_map_cached_only()
+        # 标准化代码格式：600519.SH -> 600519.SH
+        std_symbol = symbol.strip().upper()
+        if std_symbol in code_to_name:
+            return code_to_name[std_symbol]
+        # 尝试不带后缀查找
+        base_code = std_symbol.split(".")[0]
+        for code, name in code_to_name.items():
+            if code.split(".")[0] == base_code:
+                return name
+    except Exception:
+        pass
+    return ""
+
+
 def _clip_text(text: str | None, limit: int = 1800) -> str:
     """截断文本（去除多余空白，限制长度）。"""
     if not text:
@@ -101,9 +127,13 @@ def build_report_message(report: "ReportDB") -> str:
     """
     lines = [
         "TradingAgents 定时分析完成",
-        f"标的：{report.symbol}",
-        f"交易日：{report.trade_date}",
     ]
+    stock_name = _lookup_stock_name(report.symbol)
+    if stock_name:
+        lines.append(f"标的：{report.symbol}（{stock_name}）")
+    else:
+        lines.append(f"标的：{report.symbol}")
+    lines.append(f"交易日：{report.trade_date}")
 
     if getattr(report, "decision", None):
         lines.append(f"决策：{report.decision}")
@@ -154,9 +184,13 @@ def build_alert_message(
     """
     lines = [
         "TradingAgents 持仓预警",
-        f"标的：{symbol}",
-        f"日期：{trade_date}",
     ]
+    stock_name = _lookup_stock_name(symbol)
+    if stock_name:
+        lines.append(f"标的：{symbol}（{stock_name}）")
+    else:
+        lines.append(f"标的：{symbol}")
+    lines.append(f"日期：{trade_date}")
 
     if quote.get("current_price"):
         lines.append(f"当前价：{quote['current_price']}")

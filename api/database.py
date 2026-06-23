@@ -186,11 +186,11 @@ def _ensure_report_schema() -> None:
 
 
 def _ensure_user_schema() -> None:
-    """为现有 SQLite 部署添加用户相关表的轻量级列迁移。
+    """为现有 SQLite 部署添加用户相关表和列的轻量级迁移。
 
     功能：
-    - 检查 users 表和 user_llm_configs 表是否缺少必要列
-    - 缺少时自动添加
+    - 检查 users 表和 user_llm_configs 表是否缺少必要列，缺少时自动添加
+    - 创建 alerts 和 alert_triggers 表（如果不存在）
     - 执行 API Token 哈希化迁移
     - 执行 API Key 重加密迁移
 
@@ -221,6 +221,34 @@ def _ensure_user_schema() -> None:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN api_key_pool_encrypted TEXT"))
             if "dingtalk_webhook_encrypted" not in llm_columns:
                 conn.execute(text("ALTER TABLE user_llm_configs ADD COLUMN dingtalk_webhook_encrypted TEXT"))
+
+            # 创建 alerts 表（如果不存在）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id VARCHAR(36) PRIMARY KEY,
+                    user_id VARCHAR(64) NOT NULL,
+                    symbol VARCHAR(20) NOT NULL,
+                    name VARCHAR(100),
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alerts_user_id ON alerts (user_id)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alerts_symbol ON alerts (symbol)"))
+
+            # 创建 alert_triggers 表（如果不存在）
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS alert_triggers (
+                    id VARCHAR(36) PRIMARY KEY,
+                    alert_id VARCHAR(36) NOT NULL,
+                    trigger_type VARCHAR(30) NOT NULL,
+                    threshold FLOAT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alert_triggers_alert_id ON alert_triggers (alert_id)"))
     except Exception as e:
         logger.error("确保用户表 Schema 失败: %s", e)
 
@@ -556,6 +584,75 @@ class PredictionSnapshotDB(Base):
             "attribution": self.attribution,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "backfilled_at": self.backfilled_at.isoformat() if self.backfilled_at else None,
+        }
+
+
+class AlertDB(Base):
+    """预警数据库模型。
+
+    存储用户设置的持仓预警条件。
+
+    字段说明：
+    - id: 预警唯一标识
+    - user_id: 用户 ID
+    - symbol: 股票代码
+    - name: 用户自定义名称
+    - is_active: 是否启用
+    - created_at: 创建时间
+    - updated_at: 更新时间
+    """
+    __tablename__ = "alerts"
+
+    id = Column(String(36), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=False)
+    symbol = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "symbol": self.symbol,
+            "name": self.name,
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class AlertTriggerDB(Base):
+    """预警触发条件数据库模型。
+
+    存储预警的具体触发条件。
+
+    字段说明：
+    - id: 触发条件唯一标识
+    - alert_id: 关联的预警 ID
+    - trigger_type: 触发类型（price_above / price_below / daily_change_pct / unrealized_pnl_pct）
+    - threshold: 阈值
+    - enabled: 是否启用
+    - created_at: 创建时间
+    """
+    __tablename__ = "alert_triggers"
+
+    id = Column(String(36), primary_key=True, index=True)
+    alert_id = Column(String(36), index=True, nullable=False)
+    trigger_type = Column(String(30), nullable=False)
+    threshold = Column(Float, nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "alert_id": self.alert_id,
+            "trigger_type": self.trigger_type,
+            "threshold": self.threshold,
+            "enabled": self.enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
