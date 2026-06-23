@@ -72,6 +72,19 @@ export default function TrackingBoardPanel() {
         return values.length > 0 ? values[0] : null
     }, [trackingItems])
 
+    const comparisonStats = useMemo(() => {
+        let mismatchSell = 0
+        let mismatchBuy = 0
+        let matchCount = 0
+        for (const item of trackingItems) {
+            const c = item.analysis?.comparison
+            if (c === 'mismatch_sell_but_holding') mismatchSell += 1
+            else if (c === 'mismatch_buy_but_missing') mismatchBuy += 1
+            else if (c === 'match') matchCount += 1
+        }
+        return { mismatchSell, mismatchBuy, matchCount, total: trackingItems.length }
+    }, [trackingItems])
+
     useEffect(() => {
         try {
             localStorage.setItem('ta-tracking-board-view', viewMode)
@@ -375,27 +388,42 @@ export default function TrackingBoardPanel() {
                         在上方导入持仓后，这里会自动出现实时跟踪卡片。
                     </p>
                 </div>
-            ) : viewMode === 'simple' ? (
-                <SimpleBoardView
-                    items={trackingItems}
-                    trackingRefreshing={trackingRefreshing}
-                    trackingError={trackingError}
-                    lastQuoteTime={lastQuoteTime}
-                    onDeletePosition={handleDeletePosition}
-                    deletingSymbol={deletingSymbol}
-                />
             ) : (
-                <DetailedBoardView
-                    items={trackingItems}
-                    trackingRefreshing={trackingRefreshing}
-                    trackingError={trackingError}
-                    liveMarketValueTotal={liveMarketValueTotal}
-                    floatingPnlTotal={floatingPnlTotal}
-                    onAnalyze={symbol => navigate(`/analysis?symbol=${symbol}`)}
-                    onOpenReport={reportId => navigate(`/reports?report=${reportId}`)}
-                    onDeletePosition={handleDeletePosition}
-                    deletingSymbol={deletingSymbol}
-                />
+                <>
+                    {(comparisonStats.mismatchSell > 0 || comparisonStats.mismatchBuy > 0) && (
+                        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
+                            <ShieldAlert className="h-4 w-4" />
+                            <span className="font-medium">
+                                持仓对比提示：
+                                {comparisonStats.mismatchSell > 0 && `建议卖出但仍在持有 ${comparisonStats.mismatchSell} 只`}
+                                {comparisonStats.mismatchSell > 0 && comparisonStats.mismatchBuy > 0 && '；'}
+                                {comparisonStats.mismatchBuy > 0 && `建议买入但未持有 ${comparisonStats.mismatchBuy} 只`}
+                            </span>
+                        </div>
+                    )}
+                    {viewMode === 'simple' ? (
+                        <SimpleBoardView
+                            items={trackingItems}
+                            trackingRefreshing={trackingRefreshing}
+                            trackingError={trackingError}
+                            lastQuoteTime={lastQuoteTime}
+                            onDeletePosition={handleDeletePosition}
+                            deletingSymbol={deletingSymbol}
+                        />
+                    ) : (
+                        <DetailedBoardView
+                            items={trackingItems}
+                            trackingRefreshing={trackingRefreshing}
+                            trackingError={trackingError}
+                            liveMarketValueTotal={liveMarketValueTotal}
+                            floatingPnlTotal={floatingPnlTotal}
+                            onAnalyze={symbol => navigate(`/analysis?symbol=${symbol}`)}
+                            onOpenReport={reportId => navigate(`/reports?report=${reportId}`)}
+                            onDeletePosition={handleDeletePosition}
+                            deletingSymbol={deletingSymbol}
+                        />
+                    )}
+                </>
             )}
         </div>
     )
@@ -495,9 +523,15 @@ function SimpleTrackingRow({ item, onDelete, deleting }: { item: TrackingBoardIt
             ? 'text-rose-600 dark:text-rose-400'
             : 'text-emerald-600 dark:text-emerald-400'
     const rangeAlert = getModelRangeAlert(item)
+    const comparison = item.analysis?.comparison
+    const rowBorderClass = comparison === 'mismatch_sell_but_holding'
+        ? 'border-l-4 border-l-rose-500'
+        : comparison === 'mismatch_buy_but_missing'
+            ? 'border-l-4 border-l-amber-400'
+            : ''
 
     return (
-        <div className="grid grid-cols-[1.36fr_0.88fr_0.74fr_0.78fr_1.28fr_0.86fr_0.96fr_0.5fr] gap-4 border-b border-slate-200 px-5 py-5 last:border-b-0 dark:border-slate-700">
+        <div className={`grid grid-cols-[1.36fr_0.88fr_0.74fr_0.78fr_1.28fr_0.86fr_0.96fr_0.5fr] gap-4 border-b border-slate-200 px-5 py-5 last:border-b-0 dark:border-slate-700 ${rowBorderClass}`}>
             <div className="min-w-0">
                 <div className="truncate text-[18px] font-semibold text-slate-900 dark:text-slate-100">{item.name}</div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500 dark:text-slate-400">
@@ -744,6 +778,12 @@ function DetailedTrackingRow({
     const rangeLabel = analysis?.is_previous_trade_day ? '昨日报告高低位' : `最近报告高低位 · ${analysis?.trade_date || '--'}`
     const decisionText = analysis?.decision?.toUpperCase() ?? ''
     const directionText = analysis?.direction ?? ''
+    const comparison = analysis?.comparison
+    const cardBorderClass = comparison === 'mismatch_sell_but_holding'
+        ? 'border-rose-300 dark:border-rose-500/40'
+        : comparison === 'mismatch_buy_but_missing'
+            ? 'border-amber-300 dark:border-amber-500/40'
+            : ''
 
     let decisionToneClass = 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300'
     if (decisionText.includes('BUY') || directionText.includes('增持')) {
@@ -758,7 +798,7 @@ function DetailedTrackingRow({
     }
 
     return (
-        <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/40">
+        <div className={`rounded-2xl border bg-slate-50/70 p-4 shadow-sm dark:bg-slate-900/40 ${cardBorderClass}`}>
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center">
                 <div className="min-w-0 xl:w-[220px]">
                     <div className="flex items-center gap-2">
@@ -912,6 +952,17 @@ function DetailedTrackingRow({
                                         {analysis.trade_date}
                                     </span>
                                 </div>
+                                {analysis.comparison_note && (
+                                    <div className={`mt-2 rounded-lg px-2.5 py-1.5 text-[11px] font-medium ${
+                                        analysis.comparison === 'mismatch_sell_but_holding'
+                                            ? 'bg-rose-50 text-rose-600 dark:bg-rose-500/10 dark:text-rose-300'
+                                            : analysis.comparison === 'mismatch_buy_but_missing'
+                                                ? 'bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300'
+                                                : 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                    }`}>
+                                        {analysis.comparison_note}
+                                    </div>
+                                )}
 
                                 <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400">
                                     <MetricPill label="高位" value={formatPrice(analysis.high_price)} />

@@ -97,6 +97,11 @@ def get_tracking_board(db: Session, user_id: str) -> dict[str, Any]:
             else None
         )
 
+        report = reports.get(row.symbol)
+        analysis = _serialize_report_summary(report, previous_trade_date)
+        if analysis is not None:
+            analysis.update(_compare_position_with_analysis(current_position, report))
+
         items.append(
             {
                 "symbol": row.symbol,
@@ -121,7 +126,7 @@ def get_tracking_board(db: Session, user_id: str) -> dict[str, Any]:
                 "quote_time": quote.get("quote_time"),
                 "quote_source": quote.get("source"),
                 "last_imported_at": row.last_imported_at.isoformat() if row.last_imported_at else None,
-                "analysis": _serialize_report_summary(reports.get(row.symbol), previous_trade_date),
+                "analysis": analysis,
             }
         )
 
@@ -204,6 +209,67 @@ def _select_reports_for_symbols(
             selected[symbol] = report
     
     return selected
+
+
+def _compare_position_with_analysis(current_position: float | None, report: ReportDB | None) -> dict[str, Any]:
+    """对比当前持仓状态与最新分析建议。
+    
+    Args:
+        current_position: 当前持仓数量
+        report: 最新研报对象
+    
+    Returns:
+        对比结果字典，包含 comparison / suggested_action / urgency / comparison_note
+    """
+    if report is None:
+        return {
+            "comparison": "neutral",
+            "suggested_action": "hold",
+            "urgency": "low",
+            "comparison_note": None,
+        }
+
+    direction = (report.direction or "").upper()
+    has_position = (current_position or 0) > 0
+
+    buy_signals = {"BUY", "看多", "多", "BULLISH", "LEAN_BULLISH", "偏多"}
+    sell_signals = {"SELL", "看空", "空", "BEARISH", "LEAN_BEARISH", "偏空"}
+
+    if direction in sell_signals and has_position:
+        return {
+            "comparison": "mismatch_sell_but_holding",
+            "suggested_action": "reduce",
+            "urgency": "high",
+            "comparison_note": "建议卖出，当前仍持有",
+        }
+    if direction in buy_signals and not has_position:
+        return {
+            "comparison": "mismatch_buy_but_missing",
+            "suggested_action": "add",
+            "urgency": "medium",
+            "comparison_note": "建议买入，当前未持有",
+        }
+    if direction in sell_signals and not has_position:
+        return {
+            "comparison": "match",
+            "suggested_action": "exit",
+            "urgency": "low",
+            "comparison_note": "建议空仓，当前未持有",
+        }
+    if direction in buy_signals and has_position:
+        return {
+            "comparison": "match",
+            "suggested_action": "hold",
+            "urgency": "low",
+            "comparison_note": "建议持有，当前已持有",
+        }
+
+    return {
+        "comparison": "neutral",
+        "suggested_action": "hold",
+        "urgency": "low",
+        "comparison_note": None,
+    }
 
 
 def _serialize_report_summary(report: ReportDB | None, previous_trade_date: str) -> dict[str, Any] | None:

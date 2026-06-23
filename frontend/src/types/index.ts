@@ -519,6 +519,10 @@ export interface TrackingBoardAnalysis {
     trader_advice_summary?: string | null
     trader_investment_plan?: string | null
     final_trade_decision?: string | null
+    comparison?: 'match' | 'mismatch_sell_but_holding' | 'mismatch_buy_but_missing' | 'neutral'
+    suggested_action?: 'hold' | 'reduce' | 'add' | 'exit'
+    urgency?: 'high' | 'medium' | 'low'
+    comparison_note?: string | null
 }
 
 export interface TrackingBoardItem {
