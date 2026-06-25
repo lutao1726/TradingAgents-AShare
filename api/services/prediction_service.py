@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from urllib.parse import quote
 
+import pandas as pd
 import requests
 from sqlalchemy import or_
 
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 def _fetch_close(symbol: str, trade_date: datetime) -> Optional[float]:
     """获取指定日期的收盘价。
 
-    优先使用 AKShare，失败时 fallback 到 yfinance。
+    优先使用 AKShare，失败时 fallback 到 BaoStock。
 
     Args:
         symbol: 股票代码（如 600519.SH）
@@ -34,32 +35,55 @@ def _fetch_close(symbol: str, trade_date: datetime) -> Optional[float]:
     Returns:
         收盘价，获取失败返回 None
     """
-    date_str = trade_date.strftime("%Y%m%d")
+    date_str_ak = trade_date.strftime("%Y%m%d")
+    date_str_bs = trade_date.strftime("%Y-%m-%d")
+    std_code = symbol.split(".")[0]
 
     # 尝试 AKShare
     try:
         import akshare as ak
-        # 标准化代码
-        std_symbol = symbol.split(".")[0]
-        df = ak.stock_zh_a_hist(symbol=std_symbol, period="daily",
-                                 start_date=date_str, end_date=date_str, adjust="")
+        df = ak.stock_zh_a_hist(symbol=std_code, period="daily",
+                                 start_date=date_str_ak, end_date=date_str_ak, adjust="")
         if df is not None and not df.empty:
             return float(df.iloc[0]["收盘"])
     except Exception as exc:
-        logger.debug("[Prediction] AKShare fetch failed for %s %s: %s", symbol, date_str, exc)
+        logger.debug("[Prediction] AKShare fetch failed for %s %s: %s", symbol, date_str_ak, exc)
 
-    # Fallback: yfinance
+    # Fallback: BaoStock
     try:
-        import yfinance as yf
-        # 转换代码格式：600519.SH -> 600519.SS
-        yf_symbol = symbol.replace(".SH", ".SS").replace(".SZ", ".SZ")
-        ticker = yf.Ticker(yf_symbol)
-        hist = ticker.history(start=trade_date.strftime("%Y-%m-%d"),
-                              end=(trade_date + timedelta(days=1)).strftime("%Y-%m-%d"))
-        if not hist.empty:
-            return float(hist["Close"].iloc[0])
+        import baostock as bs
+
+        code = std_code
+        if code.startswith(("5", "6", "9")):
+            bs_code = f"sh.{code}"
+        else:
+            bs_code = f"sz.{code}"
+
+        lg = bs.login()
+        if getattr(lg, "error_code", "1") == "0":
+            try:
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,close",
+                    start_date=date_str_bs,
+                    end_date=date_str_bs,
+                    frequency="d",
+                    adjustflag="2",
+                )
+                if getattr(rs, "error_code", "1") == "0":
+                    rows = []
+                    while rs.next():
+                        rows.append(rs.get_row_data())
+                    if rows:
+                        df = pd.DataFrame(rows, columns=rs.fields)
+                        if "close" in df.columns and not df.empty:
+                            val = df.iloc[0]["close"]
+                            if val and str(val).strip() and str(val).strip() != '-':
+                                return float(val)
+            finally:
+                bs.logout()
     except Exception as exc:
-        logger.debug("[Prediction] yfinance fetch failed for %s %s: %s", symbol, date_str, exc)
+        logger.debug("[Prediction] BaoStock fetch failed for %s %s: %s", symbol, date_str_bs, exc)
 
     return None
 
