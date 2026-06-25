@@ -205,11 +205,12 @@ def compute_accuracy(user_id: Optional[str] = None, symbol: Optional[str] = None
             if s.confidence is None:
                 continue
             bucket = (s.confidence // 10) * 10  # 0-10, 10-20, ...
-            if bucket not in confidence_buckets:
-                confidence_buckets[bucket] = {"total": 0, "correct": 0}
-            confidence_buckets[bucket]["total"] += 1
+            bucket_key = str(bucket)
+            if bucket_key not in confidence_buckets:
+                confidence_buckets[bucket_key] = {"total": 0, "correct": 0}
+            confidence_buckets[bucket_key]["total"] += 1
             if s.direction_correct:
-                confidence_buckets[bucket]["correct"] += 1
+                confidence_buckets[bucket_key]["correct"] += 1
 
         return {
             "total": total,
