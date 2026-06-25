@@ -15,6 +15,7 @@ from typing import Optional
 from urllib.parse import quote
 
 import requests
+from sqlalchemy import or_
 
 from api.database import PredictionSnapshotDB, get_db_ctx
 
@@ -74,10 +75,11 @@ def backfill_prediction(db, snapshot_id: str) -> dict:
         回填结果字典
     """
     snapshot = db.query(PredictionSnapshotDB).filter_by(id=snapshot_id).first()
-    if not snapshot or snapshot.backfilled_at:
-        return {"status": "skipped", "reason": "not_found_or_already_backfilled"}
+    if not snapshot:
+        return {"status": "skipped", "reason": "not_found"}
 
     trade_date = datetime.strptime(snapshot.trade_date, "%Y-%m-%d")
+    today = datetime.now().date()
 
     # 获取预测日收盘价作为基准
     base_close = _fetch_close(snapshot.symbol, trade_date)
@@ -85,32 +87,45 @@ def backfill_prediction(db, snapshot_id: str) -> dict:
         return {"status": "skipped", "reason": "base_price_not_found"}
 
     results = {}
+    has_update = False
+
     for label, offset_days in [("t1", 1), ("t5", 5), ("t20", 20)]:
+        # 如果已经有数据，跳过
+        if getattr(snapshot, f"return_{label}") is not None:
+            continue
+
         target_date = trade_date + timedelta(days=offset_days)
+        # 只回填已经过去的日期
+        if target_date.date() > today:
+            continue
+
         close = _fetch_close(snapshot.symbol, target_date)
         if close is not None:
             return_pct = (close - base_close) / base_close * 100
             setattr(snapshot, f"actual_close_{label}", close)
             setattr(snapshot, f"return_{label}", return_pct)
             results[label] = {"close": close, "return_pct": return_pct}
+            has_update = True
 
     # 方向准确率（基于 T+1）
-    if snapshot.return_t1 is not None:
+    if snapshot.return_t1 is not None and snapshot.direction_correct is None:
         predicted_up = snapshot.direction in ("BUY", "看多", "偏多", "买入")
         actual_up = snapshot.return_t1 > 0
         snapshot.direction_correct = (predicted_up == actual_up)
+        has_update = True
 
-    snapshot.backfilled_at = datetime.utcnow()
-    db.commit()
+    if has_update:
+        snapshot.backfilled_at = datetime.utcnow()
+        db.commit()
 
     return {"status": "ok", "base_close": base_close, "results": results}
 
 
 def backfill_pending(limit: int = 100) -> dict:
-    """批量回填所有未回填的预测。
+    """批量回填所有未完全回填的预测。
 
     Args:
-        limit: 最多回填条数
+        limit: 最多处理条数
 
     Returns:
         回填统计
@@ -119,8 +134,12 @@ def backfill_pending(limit: int = 100) -> dict:
 
     with get_db_ctx() as db:
         pending = db.query(PredictionSnapshotDB).filter(
-            PredictionSnapshotDB.backfilled_at.is_(None)
-        ).limit(limit).all()
+            or_(
+                PredictionSnapshotDB.return_t1.is_(None),
+                PredictionSnapshotDB.return_t5.is_(None),
+                PredictionSnapshotDB.return_t20.is_(None),
+            )
+        ).order_by(PredictionSnapshotDB.trade_date.asc()).limit(limit).all()
 
         stats["total"] = len(pending)
         for snap in pending:

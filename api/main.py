@@ -2101,6 +2101,7 @@ async def _run_job_inner(
                 "analyst_traces": (
                     short_r.get("analyst_traces", []) + medium_r.get("analyst_traces", [])
                 ),
+                "risk_feedback_state": primary_r.get("risk_feedback_state", {}),
             }
             # LLM 结构化提取（目标价、止损、信心、风险、关键指标）
             # 注意：必须在 _set_job(status="completed") 之前完成，否则 SSE 超时

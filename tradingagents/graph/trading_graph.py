@@ -371,6 +371,7 @@ class TradingAgentsGraph:
             "macro_report": final_state.get("macro_report", ""),
             "smart_money_report": final_state.get("smart_money_report", ""),
             "volume_price_report": final_state.get("volume_price_report", ""),
+            "risk_feedback_state": final_state.get("risk_feedback_state", {}),
         }
 
     @staticmethod

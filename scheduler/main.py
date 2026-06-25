@@ -633,8 +633,8 @@ async def _startup():
         _log("[PredictionBackfill] Loop started.")
         while True:
             now = datetime.now(tz=ZoneInfo("Asia/Shanghai"))
-            # 每天 8:05 执行一次
-            if now.hour == 8 and now.minute == 5:
+            # 每个交易日 15:10 执行一次（收盘后）
+            if now.hour == 15 and now.minute == 10:
                 if is_cn_trading_day(now.strftime("%Y-%m-%d")):
                     _log("[PredictionBackfill] Running daily backfill...")
                     try:
