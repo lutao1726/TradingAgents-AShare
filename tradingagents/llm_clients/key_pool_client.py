@@ -21,6 +21,7 @@ API Key 池客户端包装器：为 LLM 客户端添加 Key 池支持。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Callable, Optional
@@ -195,6 +196,36 @@ class KeyPoolLLMWrapper:
             return f"{api_key[:4]}****{api_key[-4:]}"
         return "****"
     
+    def _is_retryable_error(self, error: Exception) -> bool:
+        """判断错误是否可重试（自动换 Key 重试）。
+        
+        可重试的错误：
+        - 404 Not Found：模型名不存在或端点失效
+        - 401 Unauthorized：Key 无效或过期
+        - 429 Too Many Requests：限流
+        - 500/502/503：服务端错误
+        """
+        error_str = str(error).lower()
+        error_type = type(error).__name__
+        
+        # 404 / Not Found：模型或端点不存在
+        if "404" in error_str or "not found" in error_str or "NotFoundError" in error_type:
+            return True
+        
+        # 401：Key 无效
+        if "401" in error_str or "unauthorized" in error_str:
+            return True
+        
+        # 429：限流
+        if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+            return True
+        
+        # 500+：服务端错误
+        if "500" in error_str or "502" in error_str or "503" in error_str:
+            return True
+        
+        return False
+    
     def _set_api_key(self, api_key: str):
         """设置 API Key 到 LLM 实例。"""
         # 根据 LangChain LLM 类型设置 API Key
@@ -231,50 +262,76 @@ class KeyPoolLLMWrapper:
         return results
     
     def stream(self, input: Any, config: Any = None, **kwargs: Any):
-        """流式调用 LLM。"""
-        # 从 Key 池获取 Key
-        self._current_key = get_key_from_pool(self.pool_id)
-        if not self._current_key:
-            _logger.error(f"[KeyPool] Key 池 {self.pool_id} 中没有可用的 Key")
-            raise ValueError(f"Key 池 {self.pool_id} 中没有可用的 Key")
+        """流式调用 LLM，失败时自动换 Key 重试。"""
+        max_retries = 3
+        last_error = None
         
-        masked_key = self._mask_key(self._current_key)
-        self._set_api_key(self._current_key)
+        for attempt in range(max_retries):
+            # 从 Key 池获取 Key
+            self._current_key = get_key_from_pool(self.pool_id)
+            if not self._current_key:
+                _logger.error(f"[KeyPool] Key 池 {self.pool_id} 中没有可用的 Key")
+                raise ValueError(f"Key 池 {self.pool_id} 中没有可用的 Key")
+            
+            masked_key = self._mask_key(self._current_key)
+            self._set_api_key(self._current_key)
+            
+            _logger.info(f"[KeyPool] 流式请求开始 | 池: {self.pool_id} | Key: {masked_key} | 尝试: {attempt + 1}/{max_retries}")
+            
+            try:
+                for chunk in self.original_llm.stream(input=input, config=config, **kwargs):
+                    yield chunk
+                report_key_success(self.pool_id, self._current_key, latency_ms=0)
+                _logger.info(f"[KeyPool] 流式请求完成 | 池: {self.pool_id} | Key: {masked_key}")
+                return
+            except Exception as e:
+                report_key_failure(self.pool_id, self._current_key, str(e))
+                _logger.warning(
+                    f"[KeyPool] 流式请求失败 | 池: {self.pool_id} | "
+                    f"Key: {masked_key} | 尝试: {attempt + 1}/{max_retries} | 错误: {e}"
+                )
+                last_error = e
+                if not self._is_retryable_error(e) or attempt == max_retries - 1:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
         
-        _logger.info(f"[KeyPool] 流式请求开始 | 池: {self.pool_id} | Key: {masked_key}")
-        
-        try:
-            for chunk in self.original_llm.stream(input=input, config=config, **kwargs):
-                yield chunk
-            report_key_success(self.pool_id, self._current_key, latency_ms=0)
-            _logger.info(f"[KeyPool] 流式请求完成 | 池: {self.pool_id} | Key: {masked_key}")
-        except Exception as e:
-            report_key_failure(self.pool_id, self._current_key, str(e))
-            _logger.warning(f"[KeyPool] 流式请求失败 | 池: {self.pool_id} | Key: {masked_key} | 错误: {e}")
-            raise
+        raise last_error
     
     async def astream(self, input: Any, config: Any = None, **kwargs: Any):
-        """异步流式调用 LLM。"""
-        # 从 Key 池获取 Key
-        self._current_key = get_key_from_pool(self.pool_id)
-        if not self._current_key:
-            _logger.error(f"[KeyPool] Key 池 {self.pool_id} 中没有可用的 Key")
-            raise ValueError(f"Key 池 {self.pool_id} 中没有可用的 Key")
+        """异步流式调用 LLM，失败时自动换 Key 重试。"""
+        max_retries = 3
+        last_error = None
         
-        masked_key = self._mask_key(self._current_key)
-        self._set_api_key(self._current_key)
+        for attempt in range(max_retries):
+            # 从 Key 池获取 Key
+            self._current_key = get_key_from_pool(self.pool_id)
+            if not self._current_key:
+                _logger.error(f"[KeyPool] Key 池 {self.pool_id} 中没有可用的 Key")
+                raise ValueError(f"Key 池 {self.pool_id} 中没有可用的 Key")
+            
+            masked_key = self._mask_key(self._current_key)
+            self._set_api_key(self._current_key)
+            
+            _logger.info(f"[KeyPool] 异步流式请求开始 | 池: {self.pool_id} | Key: {masked_key} | 尝试: {attempt + 1}/{max_retries}")
+            
+            try:
+                async for chunk in self.original_llm.astream(input=input, config=config, **kwargs):
+                    yield chunk
+                report_key_success(self.pool_id, self._current_key, latency_ms=0)
+                _logger.info(f"[KeyPool] 异步流式请求完成 | 池: {self.pool_id} | Key: {masked_key}")
+                return
+            except Exception as e:
+                report_key_failure(self.pool_id, self._current_key, str(e))
+                _logger.warning(
+                    f"[KeyPool] 异步流式请求失败 | 池: {self.pool_id} | "
+                    f"Key: {masked_key} | 尝试: {attempt + 1}/{max_retries} | 错误: {e}"
+                )
+                last_error = e
+                if not self._is_retryable_error(e) or attempt == max_retries - 1:
+                    raise
+                await asyncio.sleep(0.5 * (attempt + 1))
         
-        _logger.info(f"[KeyPool] 异步流式请求开始 | 池: {self.pool_id} | Key: {masked_key}")
-        
-        try:
-            async for chunk in self.original_llm.astream(input=input, config=config, **kwargs):
-                yield chunk
-            report_key_success(self.pool_id, self._current_key, latency_ms=0)
-            _logger.info(f"[KeyPool] 异步流式请求完成 | 池: {self.pool_id} | Key: {masked_key}")
-        except Exception as e:
-            report_key_failure(self.pool_id, self._current_key, str(e))
-            _logger.warning(f"[KeyPool] 异步流式请求失败 | 池: {self.pool_id} | Key: {masked_key} | 错误: {e}")
-            raise
+        raise last_error
 
 
 def create_key_pool_client(
